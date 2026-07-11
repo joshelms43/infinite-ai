@@ -1,0 +1,72 @@
+# infinite-ai engine ladder — unattended, decisive benchmark runs.
+# Run from the GitHub website: Actions → "engine ladder" → Run workflow.
+# Plays the candidate ref's engine against a frozen ref over paired seeds and
+# commits the verdict to ladder-results/ on the candidate ref, so results live
+# in git history. ~60–90 min for a 3,000-game run with the Monte Carlo brain.
+name: engine ladder
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: "Branch/ref whose engine plays as 'work'"
+        default: "main"
+        required: true
+      baseline_ref:
+        description: "Frozen ref to beat (78a6d8d = the greedy champion)"
+        default: "78a6d8d"
+        required: true
+      seeds:
+        description: "Seed range a..b (b exclusive); 500 seeds = 3,000 paired games"
+        default: "0..500"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  ladder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.candidate_ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: baseline suites must be green before any measurement
+        run: |
+          npm test
+          node tests/trainer.js --sanity
+          node tests/trainer.parity.js
+      - name: run the ladder
+        run: |
+          node tests/ladder.js work ${{ github.event.inputs.baseline_ref }} \
+            --seeds ${{ github.event.inputs.seeds }} \
+            --out /tmp/ladder-run.jsonl
+      - name: report
+        run: |
+          mkdir -p ladder-results
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          OUT="ladder-results/${STAMP}-$(echo '${{ github.event.inputs.candidate_ref }}' | tr '/' '-')-vs-${{ github.event.inputs.baseline_ref }}.md"
+          {
+            echo "# Ladder: ${{ github.event.inputs.candidate_ref }} (work) vs ${{ github.event.inputs.baseline_ref }}"
+            echo
+            echo "- run: ${{ github.run_id }} on $(date -u)"
+            echo "- seeds: ${{ github.event.inputs.seeds }} (paired; 6 games per seed)"
+            echo "- candidate commit: $(git rev-parse --short HEAD)"
+            echo
+            echo '```'
+            node tests/ladder.js --report /tmp/ladder-run.jsonl
+            echo '```'
+          } > "$OUT"
+          cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+          gzip -c /tmp/ladder-run.jsonl > "${OUT%.md}.jsonl.gz"
+      - name: commit the verdict to the candidate ref
+        run: |
+          git config user.name "engine-ladder[bot]"
+          git config user.email "engine-ladder@users.noreply.github.com"
+          git add ladder-results
+          git commit -m "ladder result: work vs ${{ github.event.inputs.baseline_ref }}, seeds ${{ github.event.inputs.seeds }} (run ${{ github.run_id }})"
+          git push origin HEAD:${{ github.event.inputs.candidate_ref }}

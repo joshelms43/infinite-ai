@@ -3210,6 +3210,333 @@ function brainCandidates(p, idx, next){
 
   return C;
 }
+/* ---------- determinized Monte Carlo (ISMCTS-lite, v0.5.0) ----------
+   Roadmap item 4. The counting layer knows the exact multiset of unseen cards, so
+   for a CONTENTIOUS decision (greedy's top candidates close in ev) the brain deals
+   out several plausible worlds — opponents' hands sampled from the unseen multiset,
+   respecting known hand sizes — plays each world to a horizon with a fast synchronous
+   greedy policy, and picks the root action with the best average outcome. Obvious
+   decisions skip all of this and stay greedy (and instant). Uses Math.random
+   throughout, so seeded harness runs stay deterministic. Execution still goes
+   through the interactive candidate closures — selection changes, rules never. */
+const MC = { det: 8, topK: 4, margin: 2.0, horizon: 16 };
+let MC_ON = true; // headless genome training rebinds this off — Monte Carlo costs ~500x per game and the genome is consumed by both layers either way
+
+function mcClone(o){ return JSON.parse(JSON.stringify(o)); }
+let MC_PROTO = null, MC_ID = 5000000;
+function mcProtoOf(kind){ // one template card per census kind, fresh ids per sample
+  if(!MC_PROTO){ MC_PROTO = {}; buildDeck().forEach(c=>{ const k = keyOf(c); if(!MC_PROTO[k]) MC_PROTO[k] = JSON.parse(JSON.stringify(c)); }); }
+  const c = JSON.parse(JSON.stringify(MC_PROTO[kind])); c.id = ++MC_ID; return c;
+}
+function determinize(selfIdx){ // a full world consistent with everything this seat can see
+  const st = { players: mcClone(G.players), discard: mcClone(G.discard),
+               turn: G.turn, playsLeft: G.playsLeft, turnCount: G.turnCount };
+  const un = unseenFor(selfIdx);
+  const pool = [];
+  Object.keys(un.m).forEach(k=>{ for(let i=0;i<un.m[k];i++) pool.push(mcProtoOf(k)); });
+  for(let i=pool.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+  st.players.forEach((q,i)=>{ if(i!==selfIdx) q.hand = pool.splice(0, q.hand.length); });
+  st.deck = pool; // the rest, in sampled order
+  return st;
+}
+function mcDraw(st){ // mirrors draw(): reshuffle the discard when the deck runs dry
+  if(!st.deck.length){
+    if(!st.discard.length) return null;
+    st.deck = st.discard.splice(0);
+    for(let i=st.deck.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [st.deck[i],st.deck[j]]=[st.deck[j],st.deck[i]]; }
+  }
+  return st.deck.pop();
+}
+function mcPay(st, payerIdx, rcvIdx, amount){ // real payment semantics: no change, overpay allowed
+  const q = st.players[payerIdx], rcv = st.players[rcvIdx];
+  let owed = amount;
+  while(owed > 0){
+    const bank = q.bank.slice().sort((a,b)=>a.v-b.v);
+    const c = bank.find(x=>x.v>=owed) || bank[bank.length-1]; // smallest sufficient note, else biggest
+    if(!c) break;
+    q.bank.splice(q.bank.findIndex(x=>x.id===c.id),1); rcv.bank.push(c); owed -= c.v;
+  }
+  if(owed > 0){
+    const order = propList(q).filter(x=>!isComplete(q,x.color)).sort((a,b)=>a.card.v-b.card.v)
+      .concat(propList(q).filter(x=>isComplete(q,x.color)).sort((a,b)=>a.card.v-b.card.v));
+    for(const x of order){
+      if(owed<=0) break;
+      const arr = q.props[x.color]; const i = arr ? arr.findIndex(c=>c.id===x.card.id) : -1;
+      if(i>-1){
+        arr.splice(i,1); if(!arr.length) delete q.props[x.color];
+        if(x.card.t==='prop'){ if(!rcv.props[x.color]) rcv.props[x.color]=[]; rcv.props[x.color].push(x.card); }
+        else rcv.bank.push(x.card);
+        owed -= Math.max(1, x.card.v);
+      }
+    }
+  }
+}
+function mcBlocked(st, defIdx, atkIdx, loss, isTakeover){ // No Deal chain with the ACTUAL dealt hands
+  const wants = (p, l, tk) => tk || l >= 4;
+  let a = defIdx, b = atkIdx, count = 0;
+  for(;;){
+    const p = st.players[a];
+    const i = p.hand.findIndex(c=>c.t==='action'&&c.kind==='nodeal');
+    if(i<0 || !wants(p, loss, isTakeover)) return count%2===1;
+    p.hand.splice(i,1); st.discard.push({t:'action',kind:'nodeal',v:4,id:++MC_ID});
+    count++; const tmp=a; a=b; b=tmp;
+  }
+}
+function mcTake(q, id){ const i=q.hand.findIndex(c=>c.id===id); return i>-1 ? q.hand.splice(i,1)[0] : null; }
+// mcMoves: greedy-policy move list over a (possibly determinized) state. evs mirror
+// brainCandidates' formulas; exec applies REAL effects with the world's actual cards.
+function mcMoves(st, idx){
+  const me = st.players[idx], W = wOf(me), moves = [];
+  const enemies = st.players.map((_,i)=>i).filter(i=>i!==idx);
+  const pjq = t => st.players[t].hand.some(c=>c.t==='action'&&c.kind==='nodeal') ? 0.85 : 0; // world is dealt — near-certain
+  const jsnLite = (ev, t) => ev*(1-pjq(t)) + W.jsn_burn*pjq(t);
+  const liq = q => payAssetsTotal(q);
+  const add = (ev, mv) => { if(ev > 0.4){ mv.ev = ev; moves.push(mv); } };
+  const seen = new Set();
+  const hikeCard = me.hand.find(x=>x.t==='action'&&x.kind==='hike');
+
+  me.hand.forEach(c=>{
+    // rent/wild kinds keep their colour pairs distinct — keyOf collapses them
+    const kk = (c.t==='rent'||c.t==='wild') ? c.t+':'+c.colors.join(',') : keyOf(c);
+    if(seen.has(kk)) return; seen.add(kk);
+
+    if(c.t==='prop') add(progressGain(me, c.color), { cardId:c.id, mode:'play', plays:1,
+      exec(s){ const q=s.players[idx]; mcTake(q,c.id); if(!q.props[c.color]) q.props[c.color]=[]; q.props[c.color].push(c); } });
+
+    if(c.t==='wild'||c.t==='wildall'){
+      const col = aiWildColor(me, c);
+      if(col && (c.t==='wild' || countIn(me,col)>0)){
+        const need = COLORS[col].size - countIn(me,col) - 1;
+        const odds = colorSupply(me, col, idx) >= need ? 1 : W.wild_dead;
+        add(progressGain(me,col)*odds*0.95, { cardId:c.id, mode:'play', plays:1,
+          exec(s){ const q=s.players[idx]; mcTake(q,c.id); if(!q.props[col]) q.props[col]=[]; q.props[col].push(c); } });
+      }
+    }
+
+    if(c.t==='rent'||c.t==='rentall'){
+      const cols = c.t==='rent' ? c.colors : Object.keys(me.props);
+      let bo = null;
+      cols.forEach(col=>{ const r = rentFor(me,col); if(r>0 && (!bo||r>bo.r)) bo = {col, r}; });
+      if(bo){
+        const targets = c.t==='rentall'
+          ? [enemies.slice().sort((a,b)=>liq(st.players[b])-liq(st.players[a]))[0]]
+          : enemies;
+        const collect = amt => targets.reduce((s,t)=>s+jsnLite(Math.min(amt, liq(st.players[t]))*W.rent_eff, t), 0);
+        const mkExec = mult => function(s){
+          const q = s.players[idx];
+          mcTake(q,c.id); s.discard.push(c);
+          if(mult>1 && hikeCard){ mcTake(q,hikeCard.id); s.discard.push(hikeCard); }
+          const cs = c.t==='rent' ? c.colors : Object.keys(q.props);
+          let best = 0; cs.forEach(col=>{ best = Math.max(best, rentFor(q,col)); });
+          targets.forEach(t=>{
+            if(mcBlocked(s, t, idx, Math.min(best*mult, liq(s.players[t])), false)) return;
+            mcPay(s, t, idx, best*mult);
+          });
+        };
+        add(collect(bo.r), { cardId:c.id, mode:'play', plays:1, hike:false, exec: mkExec(1) });
+        if(hikeCard) add(collect(bo.r*2)-W.hike_cost, { cardId:c.id, mode:'play', plays:2, hike:true, exec: mkExec(2) });
+      }
+    }
+
+    if(c.t==='action'){
+      if(c.kind==='takeover'){
+        let best = null;
+        enemies.forEach(t=>completeColors(st.players[t]).forEach(col=>{
+          const val = (st.players[t].props[col]||[]).reduce((sm,x)=>sm+x.v,0) + rentFor(st.players[t],col)*0.5;
+          if(!best||val>best.val) best = {t,col,val};
+        }));
+        if(best){
+          const winNow = completeColors(me).length>=2;
+          const urgent = completeColors(st.players[best.t]).length>=2;
+          let ev = winNow ? 1000 : jsnLite(W.tk_base + best.val*W.tk_val, best.t);
+          if(!winNow && !urgent && st.turnCount<4) ev *= W.tk_hold;
+          add(ev, { cardId:c.id, mode:'play', plays:1,
+            exec(s){
+              const q = s.players[idx];
+              mcTake(q,c.id); s.discard.push(c);
+              if(mcBlocked(s, best.t, idx, 14, true)) return;
+              const from = s.players[best.t];
+              const cards = (from.props[best.col]||[]).splice(0);
+              delete from.props[best.col];
+              if(!q.props[best.col]) q.props[best.col]=[];
+              cards.forEach(card=>q.props[best.col].push(card));
+              if(from.bldg && from.bldg[best.col]){ q.bldg[best.col] = from.bldg[best.col]; delete from.bldg[best.col]; }
+            } });
+        }
+      }
+      if(c.kind==='swipe'){
+        let best = null;
+        enemies.forEach(t=>{
+          const tp = st.players[t];
+          propList(tp).filter(x=>!isComplete(tp,x.color)).forEach(x=>{
+            const myGain = x.card.t==='prop' ? progressGain(me, x.color) : 3;
+            const theirLoss = (countIn(tp,x.color)===COLORS[x.color].size-1 ? 4 : 1.5) + countIn(tp,x.color)*0.6;
+            const ev = jsnLite(myGain*W.sw_gain + theirLoss*W.sw_loss + x.card.v*W.sw_v, t);
+            if(!best||ev>best.ev) best = {t, id:x.card.id, color:x.color, ev};
+          });
+        });
+        if(best) add(best.ev, { cardId:c.id, mode:'play', plays:1,
+          exec(s){
+            const q = s.players[idx];
+            mcTake(q,c.id); s.discard.push(c);
+            if(mcBlocked(s, best.t, idx, 6, false)) return;
+            const tp = s.players[best.t], arr = tp.props[best.color];
+            const i = arr ? arr.findIndex(cc=>cc.id===best.id) : -1;
+            if(i>-1){ const card = arr.splice(i,1)[0]; if(!arr.length) delete tp.props[best.color];
+              if(!q.props[best.color]) q.props[best.color]=[]; q.props[best.color].push(card); }
+          } });
+      }
+      if(c.kind==='swap'){
+        let best = null;
+        const mine = propList(me).filter(x=>!isComplete(me,x.color) && x.card.t==='prop');
+        enemies.forEach(t=>{
+          const tp = st.players[t];
+          propList(tp).filter(x=>!isComplete(tp,x.color) && x.card.t==='prop').forEach(x=>{
+            mine.forEach(mx=>{
+              const net = progressGain(me, x.color)
+                        - (countIn(me,mx.color)===COLORS[mx.color].size-1 ? 6 : 2)
+                        + (countIn(tp,x.color)===COLORS[x.color].size-1 ? 4 : 1.5)
+                        - (countIn(tp,mx.color)===COLORS[mx.color].size-1 ? 6 : 1.5);
+              if(net>W.swap_min){
+                const ev = jsnLite(net, t);
+                if(!best||ev>best.ev) best = {t, id:x.card.id, color:x.color, myId:mx.card.id, myColor:mx.color, ev};
+              }
+            });
+          });
+        });
+        if(best) add(best.ev, { cardId:c.id, mode:'play', plays:1,
+          exec(s){
+            const q = s.players[idx];
+            mcTake(q,c.id); s.discard.push(c);
+            if(mcBlocked(s, best.t, idx, 4, false)) return;
+            const tp = s.players[best.t];
+            const ta = tp.props[best.color]; const ti = ta?ta.findIndex(cc=>cc.id===best.id):-1;
+            const ma = q.props[best.myColor]; const mi = ma?ma.findIndex(cc=>cc.id===best.myId):-1;
+            if(ti>-1 && mi>-1){
+              const theirCard = ta.splice(ti,1)[0]; if(!ta.length) delete tp.props[best.color];
+              const myCard = ma.splice(mi,1)[0]; if(!ma.length) delete q.props[best.myColor];
+              if(!q.props[best.color]) q.props[best.color]=[]; q.props[best.color].push(theirCard);
+              if(!tp.props[best.myColor]) tp.props[best.myColor]=[]; tp.props[best.myColor].push(myCard);
+            }
+          } });
+      }
+      if(c.kind==='favour'){
+        const t = enemies.slice().sort((a,b)=>liq(st.players[b])-liq(st.players[a]))[0];
+        add(jsnLite(Math.min(5, liq(st.players[t]))*0.85, t), { cardId:c.id, mode:'play', plays:1,
+          exec(s){ const q=s.players[idx]; mcTake(q,c.id); s.discard.push(c);
+            if(!mcBlocked(s, t, idx, 5, false)) mcPay(s, t, idx, 5); } });
+      }
+      if(c.kind==='shout'){
+        const ev = enemies.reduce((s,t)=>s+jsnLite(Math.min(2, liq(st.players[t]))*0.85, t), 0);
+        add(ev, { cardId:c.id, mode:'play', plays:1,
+          exec(s){ const q=s.players[idx]; mcTake(q,c.id); s.discard.push(c);
+            enemies.forEach(t=>{ if(!mcBlocked(s, t, idx, 2, false)) mcPay(s, t, idx, 2); }); } });
+      }
+      if(c.kind==='payday') add(W.pd_base + (me.hand.length<=3?W.pd_low:0) - (me.hand.length>=7?W.pd_high:0),
+        { cardId:c.id, mode:'play', plays:1,
+          exec(s){ const q=s.players[idx]; mcTake(q,c.id); s.discard.push(c);
+            const a=mcDraw(s), b=mcDraw(s); if(a)q.hand.push(a); if(b)q.hand.push(b); } });
+      if(c.kind==='granny'){
+        const col = completeColors(me).find(cc=>cc!=='black' && !(me.bldg[cc]&&me.bldg[cc].granny));
+        if(col) add(3.8, { cardId:c.id, mode:'play', plays:1,
+          exec(s){ const q=s.players[idx]; const c2 = completeColors(q).find(cc=>cc!=='black' && !(q.bldg[cc]&&q.bldg[cc].granny));
+            mcTake(q,c.id); if(c2){ if(!q.bldg[c2]) q.bldg[c2]={}; q.bldg[c2].granny = c; } else s.discard.push(c); } });
+      }
+      if(c.kind==='resort'){
+        const col = completeColors(me).find(cc=>me.bldg[cc]&&me.bldg[cc].granny&&!me.bldg[cc].resort);
+        if(col) add(4.2, { cardId:c.id, mode:'play', plays:1,
+          exec(s){ const q=s.players[idx]; const c2 = completeColors(q).find(cc=>q.bldg[cc]&&q.bldg[cc].granny&&!q.bldg[cc].resort);
+            mcTake(q,c.id); if(c2) q.bldg[c2].resort = c; else s.discard.push(c); } });
+      }
+    }
+  });
+
+  const mn = [...me.hand].filter(c=>c.t==='money').sort((a,b)=>b.v-a.v)[0];
+  if(mn) add(0.8 + mn.v*W.bank_v, { cardId:mn.id, mode:'bank', plays:1,
+    exec(s){ const q=s.players[idx]; mcTake(q,mn.id); q.bank.push(mn); } });
+  const spare = [...me.hand].filter(c=>(c.t==='action'&&c.kind!=='nodeal')||c.t==='rent'||c.t==='rentall')
+    .sort((a,b)=>keepScore(a,me)-keepScore(b,me))[0];
+  if(spare) add((st.playsLeft<3?0.7:0.45) + spare.v*0.08, { cardId:spare.id, mode:'bank', plays:1,
+    exec(s){ const q=s.players[idx]; mcTake(q,spare.id); q.bank.push(spare); } });
+
+  return moves;
+}
+function mcWinner(st){ // 3 sets wins; at the horizon the leader takes it
+  for(let i=0;i<st.players.length;i++) if(completeColors(st.players[i]).length>=3) return i;
+  return -1;
+}
+function mcLeader(st){
+  let best = -1, bestScore = -Infinity;
+  st.players.forEach((q,i)=>{
+    let near = 0;
+    Object.keys(q.props).forEach(col=>{ if(!isComplete(q,col) && countIn(q,col)===COLORS[col].size-1) near++; });
+    const sc = completeColors(q).length*100 + near*12 + bankTotal(q);
+    if(sc > bestScore){ bestScore = sc; best = i; }
+  });
+  return best;
+}
+function rollout(st){ // synchronous fast game from a determinized state; resumes the current turn
+  for(let half=0; half<MC.horizon; half++){
+    const idx = st.turn, p = st.players[idx];
+    // one move-gen per turn, executed greedily — regenerating after every play costs
+    // ~2x the whole rollout and rollouts are approximations by design. A card can
+    // only be spent once (mcTake no-ops if it's gone), and plays are re-checked.
+    let mvs = mcMoves(st, idx).sort((a,b)=>b.ev-a.ev);
+    const spent = new Set();
+    while(st.playsLeft > 0){
+      const top = mvs.find(m=>m.plays<=st.playsLeft && !spent.has(m.cardId));
+      if(!top) break;
+      spent.add(top.cardId);
+      top.exec(st);
+      st.playsLeft -= top.plays;
+      const w = mcWinner(st);
+      if(w>=0) return w;
+    }
+    while(p.hand.length>7){ // end-of-turn discards, worst keeper first
+      p.hand.sort((a,b)=>keepScore(a,p)-keepScore(b,p));
+      st.discard.push(p.hand.shift());
+    }
+    st.turn = (st.turn+1)%st.players.length;
+    if(st.turn===0) st.turnCount++;
+    const np = st.players[st.turn];
+    const n = np.hand.length===0 ? 5 : 2;
+    for(let i=0;i<n;i++){ const c = mcDraw(st); if(c) np.hand.push(c); }
+    st.playsLeft = 3;
+  }
+  return mcLeader(st);
+}
+function mctsChoose(idx, C){
+  if(!MC_ON) return null;
+  // contentious gate: obvious decisions stay greedy and instant
+  if(C.length<2 || C[0].ev>=1000 || C[0].ev - C[1].ev > MC.margin) return null;
+  const K = Math.min(MC.topK, C.length);
+  const score = new Array(K).fill(0), tried = new Array(K).fill(0);
+  for(let d=0; d<MC.det; d++){
+    const world = determinize(idx);
+    const rootMoves = mcMoves(world, idx);
+    for(let a=0; a<K; a++){
+      const cand = C[a];
+      const wantHike = /\+ Hike/.test(cand.label||'');
+      const mv = rootMoves.find(m=>m.cardId===cand.cardId && m.mode===cand.mode && !m.hike===!wantHike);
+      if(!mv || mv.plays>world.playsLeft) continue;
+      const st = mcClone(world);
+      const mv2 = mcMoves(st, idx).find(m=>m.cardId===cand.cardId && m.mode===cand.mode && !m.hike===!wantHike);
+      if(!mv2) continue;
+      mv2.exec(st);
+      st.playsLeft -= mv2.plays;
+      const w = mcWinner(st)>=0 ? mcWinner(st) : rollout(st);
+      score[a] += (w===idx ? 1 : (w<0 ? 1/3 : 0));
+      tried[a]++;
+    }
+  }
+  let best = -1, bestAvg = -1;
+  for(let a=0; a<K; a++){
+    if(tried[a] < MC.det*0.5) continue; // unreliable action estimate — skip
+    const avg = score[a]/tried[a];
+    if(avg > bestAvg + 1e-9){ bestAvg = avg; best = a; }
+  }
+  return best > 0 ? C[best] : null; // only override greedy when a rival action wins the vote
+}
 function aiStep(p){
   if(G.over) return;
   const idx = G.turn;
@@ -3218,7 +3545,12 @@ function aiStep(p){
   const C = brainCandidates(p, idx, next);
   if(!C.length) return endTurn();
   C.sort((a,b)=>b.ev-a.ev);
-  C[0].run();
+  let choice = C[0];
+  try{
+    const mc = mctsChoose(idx, C);
+    if(mc) choice = mc;
+  }catch(e){ /* Monte Carlo must never break play — greedy fallback */ }
+  choice.run();
 }
 
 /* ================= BOOT ================= */

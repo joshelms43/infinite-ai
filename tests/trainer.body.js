@@ -233,6 +233,7 @@
   // engine log() does logs.unshift() on a never-trimmed array — O(n^2) over long runs.
   // Presentation-only, so headless drivers rebind it to a no-op (same eval scope).
   log = function(){};
+  MC_ON = false; // genome self-play measures the heuristic layer; the Monte Carlo layer reads the same genome and would slow games ~500x
   const pump = ()=>{ let n=0; while(timers.length && n<20000){ const f=timers.shift(); try{f();}catch(e){} n++; } };
   const trueRandom = Math.random;
   function playGame(seed, genomes){

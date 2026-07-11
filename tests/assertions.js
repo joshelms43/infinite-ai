@@ -131,6 +131,53 @@ T('shared evaluator scores any player (bank + play candidates)',
   cands.some(x=>x.mode==='bank'&&x.cardId===96001) && cands.some(x=>x.mode==='play'&&x.cardId===96002) && cands.every(x=>x.ev>0));
 
 
+// ===== determinized Monte Carlo (ISMCTS-lite) =====
+newGame();
+// play a few AI half-turns so zones are populated, then sample worlds from seat 1's view
+G.turn = 1; G.playsLeft = 3;
+{
+  const countAll = st => {
+    let n = st.deck.length + st.discard.length;
+    st.players.forEach(q=>{
+      n += q.hand.length + q.bank.length;
+      Object.values(q.props).forEach(arr=>n+=arr.length);
+      Object.values(q.bldg).forEach(b=>{ if(b.granny)n++; if(b.resort)n++; });
+    });
+    return n;
+  };
+  const before = G.players.map(q=>q.hand.length);
+  const myHand = JSON.stringify(G.players[1].hand.map(c=>c.id));
+  const w1 = determinize(1);
+  T('determinized world conserves all 106 cards', countAll(w1)===106);
+  T('determinization keeps own hand and opponents\' hand sizes',
+    JSON.stringify(w1.players[1].hand.map(c=>c.id))===myHand &&
+    w1.players[0].hand.length===before[0] && w1.players[2].hand.length===before[2]);
+  const w2 = determinize(1);
+  const win = rollout(w2);
+  T('rollout terminates with a valid outcome', win>=-1 && win<=2);
+  T('rollout leaves the real game untouched', countAll({deck:G.deck,discard:G.discard,players:G.players})===106);
+}
+// obvious decisions skip Monte Carlo entirely: a winning takeover is played instantly
+newGame();
+G.turn = 1; G.playsLeft = 3;
+const MP = G.players[1];
+MP.hand = [ {id:99001,t:'action',kind:'takeover',v:5} ];
+MP.props = {}; MP.bldg = {}; MP.bank = [];
+addProp(MP,{id:99003,t:'prop',color:'gold',name:'g1',v:4},'gold');
+addProp(MP,{id:99004,t:'prop',color:'gold',name:'g2',v:4},'gold');
+addProp(MP,{id:99005,t:'prop',color:'green',name:'gr1',v:2},'green');
+addProp(MP,{id:99006,t:'prop',color:'green',name:'gr2',v:2},'green');
+G.players[2].props = {}; G.players[2].bldg = {};
+addProp(G.players[2],{id:99007,t:'prop',color:'teal',name:'t1',v:3},'teal');
+addProp(G.players[2],{id:99008,t:'prop',color:'teal',name:'t2',v:3},'teal');
+addProp(G.players[2],{id:99009,t:'prop',color:'teal',name:'t3',v:3},'teal');
+{
+  const C = brainCandidates(MP,1,()=>{}).sort((a,b)=>b.ev-a.ev);
+  T('winning takeover tops the candidates', C[0].cardId===99001 && C[0].ev>=1000);
+  T('obvious decisions skip Monte Carlo (contentious gate)', mctsChoose(1, C)===null);
+}
+
+
 // ===== NET protocol =====
 newGame();
 G.players[1].bank=[{id:97001,t:'money',v:5}];

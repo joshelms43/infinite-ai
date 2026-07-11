@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<!--
+  COASTLINE — genome trainer (browser twin of tests/trainer.js)
+  v3: fixed worker boot (AI_W is eval-scoped — the ready message must be posted from
+  inside the eval; see tests/trainer.parity.js which now regression-tests boot), plus
+  a watchable dashboard: live generation race with eliminations, title-fight view for
+  confirmations, history sparkline. All rendering is main-thread and throttled to
+  ~4 Hz — the worker pool never waits on the UI.
+  One engine worker per CPU core; games are pure functions of (seed, genomes), so
+  results commit in seed order and the state file stays bit-identical to a sequential
+  run — exports load straight into `node tests/trainer.js --state FILE` and back.
+  Open from the deployed site, press Start, leave the tab overnight. ONE tab at a time.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Coastline — Trainer</title>
+<style>
+  *{ box-sizing:border-box; margin:0; }
+  body{ background:#101820; color:#e8eef4; font:15px/1.5 "Nunito Sans",system-ui,sans-serif; padding:20px; max-width:920px; margin:0 auto; }
+  h1{ font-size:22px; margin:4px 0 2px; } h1 em{ color:#f4c95d; font-style:normal; }
+  .sub{ color:#8fa1b3; font-size:13px; margin-bottom:16px; }
+  .card{ background:#1a2430; border:1px solid #2a3644; border-radius:12px; padding:14px 16px; margin-bottom:14px; }
+  .cardtitle{ font-size:13px; color:#8fa1b3; text-transform:uppercase; letter-spacing:.08em; margin-bottom:10px; }
+  .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  button{ background:#f4c95d; color:#101820; font:700 14px "Nunito Sans",system-ui,sans-serif; border:0; border-radius:8px; padding:9px 16px; cursor:pointer; }
+  button.sec{ background:#2a3644; color:#e8eef4; }
+  button:disabled{ opacity:.45; cursor:default; }
+  .badge{ font-size:12px; padding:2px 8px; border-radius:10px; background:#2a3644; color:#8fa1b3; }
+  .badge.on{ background:#173f2e; color:#4ecdc4; }
+  /* hero numbers */
+  .hero{ display:flex; gap:26px; flex-wrap:wrap; }
+  .hero .h{ min-width:100px; }
+  .hero .n{ font-size:26px; font-weight:800; color:#f4c95d; line-height:1.1; }
+  .hero .l{ font-size:12px; color:#8fa1b3; }
+  #champline{ margin-top:10px; font-size:14px; color:#4ecdc4; }
+  /* race */
+  .lane{ display:grid; grid-template-columns: 86px 52px 1fr 96px; gap:8px; align-items:center; padding:3px 0; font-size:13px; transition:opacity .5s; }
+  .lane .nm{ font-weight:700; white-space:nowrap; overflow:hidden; }
+  .lane .seeds{ color:#8fa1b3; font-size:11px; text-align:right; }
+  .lane .val{ text-align:right; font-variant-numeric:tabular-nums; color:#8fa1b3; font-size:12px; }
+  .track{ position:relative; height:14px; background:#0d141b; border-radius:7px; overflow:hidden; }
+  .track .mid{ position:absolute; left:50%; top:0; bottom:0; width:2px; background:#2a3644; z-index:2; }
+  .track .fill{ position:absolute; left:0; top:0; bottom:0; border-radius:7px; background:#3a76c4; transition:width .35s ease; }
+  .lane.leader .fill{ background:#f4c95d; }
+  .lane.leader .nm{ color:#f4c95d; }
+  .lane.sig .fill{ background:#4ecdc4; }
+  .lane.cut{ opacity:.32; }
+  .lane.cut .nm{ text-decoration:line-through; }
+  .lane.cut .fill{ background:#5a6a7a; }
+  #racemeta{ color:#8fa1b3; font-size:12px; margin-bottom:8px; }
+  /* title fight */
+  #fight{ display:none; }
+  #fight .vs{ font-size:18px; font-weight:800; margin-bottom:6px; }
+  #fight .vs em{ color:#ff6b6b; font-style:normal; }
+  #fightbar{ position:relative; height:26px; background:#0d141b; border-radius:13px; overflow:hidden; margin:8px 0; }
+  #fightbar .mid{ position:absolute; left:50%; top:0; bottom:0; width:2px; background:#4a5a6a; z-index:2; }
+  #fightbar .fill{ position:absolute; left:0; top:0; bottom:0; background:linear-gradient(90deg,#c44536,#ff6b6b); transition:width .35s ease; }
+  #fightnum{ font-size:22px; font-weight:800; color:#ff6b6b; }
+  #fightsub{ color:#8fa1b3; font-size:12px; }
+  table{ width:100%; border-collapse:collapse; font-size:13px; }
+  th,td{ text-align:left; padding:4px 8px; border-bottom:1px solid #2a3644; }
+  th{ color:#8fa1b3; font-weight:600; }
+  td.win{ color:#4ecdc4; font-weight:700; } td.rej{ color:#ff6b6b; }
+  #spark{ width:100%; height:56px; display:block; margin-bottom:8px; }
+  #log{ font:12px/1.5 ui-monospace,monospace; color:#8fa1b3; max-height:150px; overflow-y:auto; white-space:pre-wrap; }
+  #fatal{ color:#ff6b6b; font-weight:700; display:none; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>Coastline <em>Trainer</em></h1>
+<div class="sub">Paired-seed ES · successive-halving heats · CI-gated title fights · one engine per core. Twin of <code>tests/trainer.js</code> — one tab, machine awake.</div>
+
+<div class="card">
+  <div class="row">
+    <button id="startbtn" disabled>Start</button>
+    <button id="pausebtn" class="sec" disabled>Pause</button>
+    <button id="exportbtn" class="sec">Export state</button>
+    <button id="importbtn" class="sec">Import state</button>
+    <button id="champbtn" class="sec">Export champion</button>
+    <button id="resetbtn" class="sec">Reset run</button>
+    <span id="wakebadge" class="badge">wake lock off</span>
+    <span id="poolbadge" class="badge">booting…</span>
+    <span id="runbadge" class="badge">loading engine…</span>
+  </div>
+  <input type="file" id="importfile" accept=".json,application/json" style="display:none">
+  <div id="fatal"></div>
+</div>
+
+<div class="card">
+  <div class="hero">
+    <div class="h"><div class="n" id="s_games">–</div><div class="l">games played</div></div>
+    <div class="h"><div class="n" id="s_speed">–</div><div class="l">games / sec</div></div>
+    <div class="h"><div class="n" id="s_gen">–</div><div class="l">generation</div></div>
+    <div class="h"><div class="n" id="s_promo">–</div><div class="l">new champions</div></div>
+    <div class="h"><div class="n" id="s_sigma">–</div><div class="l">mutation step</div></div>
+  </div>
+  <div id="champline">–</div>
+</div>
+
+<div class="card" id="fight">
+  <div class="cardtitle">🥊 Title fight — 1,002 fresh paired games</div>
+  <div class="vs"><em id="fightname">Challenger</em> vs the Champion</div>
+  <div id="fightbar"><div class="mid"></div><div class="fill" id="fightfill" style="width:50%"></div></div>
+  <div class="row" style="justify-content:space-between">
+    <span id="fightnum">50.0%</span>
+    <span id="fightsub">seed 0/167 — needs the whole CI above 50% to take the title</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="cardtitle">Generation race</div>
+  <div id="racemeta">–</div>
+  <div id="race"></div>
+</div>
+
+<div class="card">
+  <div class="cardtitle">Season so far</div>
+  <canvas id="spark" width="880" height="56"></canvas>
+  <table>
+    <thead><tr><th>gen</th><th>heat winner (full eval)</th><th>title fight</th><th>outcome</th></tr></thead>
+    <tbody id="hist"></tbody>
+  </table>
+</div>
+
+<div class="card"><div id="log">trainer log…</div></div>
+
+<script type="text/plain" id="worker-boot">
+/* Worker bootstrap: headless stubs mirroring tests/trainer.js, then boot-eval of
+   engine + worker core in ONE direct-eval scope. NOTE: engine consts (AI_W, COLORS…)
+   are eval-scoped — nothing outside the eval can see them, so the worker core posts
+   its own 'ready' message from inside. */
+const el = () => new Proxy({classList:{add(){},remove(){},toggle(){}},style:{}},{
+  get(t,k){ if(k in t) return t[k]; return ()=>{}; },
+  set(){ return true; }
+});
+self.document = { querySelector:()=>el(), querySelectorAll:()=>[], createElement:()=>el(), getElementById:()=>el(), addEventListener:()=>{}, body:{appendChild(){}} };
+self.window = self;
+self.requestAnimationFrame = fn=>fn();
+const timers = [];
+self.setTimeout = (fn)=>{ timers.push(fn); return timers.length; };
+self.clearTimeout = ()=>{};
+self.onmessage = function(e){
+  if(e.data.type!=='boot') return;
+  try{
+    eval(e.data.engine + '\n;\n' + e.data.core); // core posts {type:'ready', AI_W} itself
+  }catch(err){
+    self.postMessage({type:'fatal', msg:String((err&&err.message)||err)});
+  }
+};
+</script>
+
+<script type="text/plain" id="worker-core">
+/* Worker core: plays seed blocks on demand. playGame/seedBlock are VERBATIM copies
+   of tests/trainer.body.js — change them there first, then mirror here. */
+function mulberry32(seed){
+  let s = (seed>>>0) + 0x9E3779B9;
+  return function(){
+    s |= 0; s = (s + 0x6D2B79F5)|0;
+    let t = Math.imul(s ^ (s>>>15), 1|s);
+    t = (t + Math.imul(t ^ (t>>>7), 61|t)) ^ t;
+    return ((t ^ (t>>>14))>>>0) / 4294967296;
+  };
+}
+const pump = ()=>{ let n=0; while(timers.length && n<20000){ const f=timers.shift(); try{f();}catch(e){} n++; } };
+const trueRandom = Math.random;
+function playGame(seed, genomes){
+  timers.length = 0; // drain BOOT/previous-game callbacks — determinism depends on this
+  Math.random = mulberry32(seed);
+  newGame();
+  G.players[0].isAI = true;
+  for(let i=0;i<3;i++) G.players[i].tuneW = genomes[i];
+  startTurn(); pump();
+  let guard = 0;
+  while(!G.over && guard<600){ if(timers.length){ pump(); } else { aiStep(cur()); pump(); } guard++; }
+  Math.random = trueRandom;
+  if(!G.over) return -1;
+  return G.players.findIndex(p=>completeColors(p).length>=3);
+}
+function seedBlock(seed, cand, champ){ // 6 paired games on one seed
+  let cW = 0, kW = 0;
+  for(const solo of [cand, champ]){
+    const fill = solo===cand ? champ : cand;
+    for(let seat=0; seat<3; seat++){
+      const gs = [fill,fill,fill]; gs[seat] = solo;
+      const w = playGame(seed, gs);
+      if(w<0) continue;
+      if(gs[w]===cand) cW++; else kW++;
+    }
+  }
+  return {cW, kW};
+}
+// engine log() is presentation-only but does logs.unshift() on a NEVER-trimmed array
+// (O(n) per call, ~30 calls/game) — over an overnight run that's an O(n^2) slowdown.
+// Rebinding here works because the core shares the engine's eval scope.
+log = function(){};
+MC_ON = false; // genome training measures the heuristic layer; Monte Carlo would slow self-play ~500x
+self.onmessage = function(e){
+  const m = e.data;
+  if(m.type!=='block') return;
+  try{
+    const res = seedBlock(m.seed, m.cand, m.champ);
+    self.postMessage({type:'res', id:m.id, cW:res.cW, kW:res.kW});
+  }catch(err){ // a throwing seed must not strand the job — report it as a skipped (undecided) block
+    self.postMessage({type:'res', id:m.id, cW:0, kW:0, error:String((err&&err.message)||err)});
+  }
+};
+self.postMessage({type:'ready', AI_W: AI_W}); // inside the eval scope — AI_W is visible here
+</script>
+
+<script type="text/plain" id="trainer-logic">
+/* SHARED LOGIC — VERBATIM copy of the marked block in tests/trainer.body.js.
+   Edit there first, then mirror here. */
+const DEFAULTS = {
+  LAMBDA: 12, MU: 4,
+  RUNG_SEEDS: [16, 50], RUNG_KEEP: [4],
+  CONFIRM_SEEDS: 167,
+  SIGMA0: 0.15, SIGMA_MIN: 0.03, SIGMA_MAX: 0.5,
+};
+const GENE_MIN = 0.01;
+const CONFIRM_SEED_BASE = 10000000; // confirmation seeds never overlap search seeds
+function cfg(S){ return Object.assign({}, DEFAULTS, S.config||{}); } // function decl — must survive direct eval on the page's main thread
+
+function mulberry32(seed){
+  let s = (seed>>>0) + 0x9E3779B9;
+  return function(){
+    s |= 0; s = (s + 0x6D2B79F5)|0;
+    let t = Math.imul(s ^ (s>>>15), 1|s);
+    t = (t + Math.imul(t ^ (t>>>7), 61|t)) ^ t;
+    return ((t ^ (t>>>14))>>>0) / 4294967296;
+  };
+}
+function gauss(rand){ // Box–Muller
+  let u = 0, v = 0;
+  while(u===0) u = rand();
+  while(v===0) v = rand();
+  return Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+}
+function clusterStat(perSeedValues){ // seed-clustered mean ± 95% CI
+  const xs = perSeedValues.filter(x=>x!=null);
+  const n = xs.length;
+  if(n<2) return { m:NaN, ci:NaN, n };
+  const m = xs.reduce((a,b)=>a+b,0)/n;
+  const v = xs.reduce((a,x)=>a+(x-m)*(x-m),0)/(n-1);
+  return { m, ci: 1.96*Math.sqrt(v/n), n };
+}
+function pct(x){ return (x*100).toFixed(1)+'%'; }
+function clone(w){ return JSON.parse(JSON.stringify(w)); }
+function sampleCandidate(mean, sigma, gen, k){ // deterministic in (gen,k) — resume-safe
+  const rand = mulberry32(0x5EED ^ (gen*2654435761>>>0) ^ (k*40503));
+  const g = {};
+  Object.keys(mean).forEach(key=>{ g[key] = +Math.max(GENE_MIN, mean[key]*Math.exp(sigma*gauss(rand))).toFixed(4); });
+  return g;
+}
+function geoMean(genomes){
+  const g = {};
+  Object.keys(genomes[0]).forEach(key=>{
+    const m = Math.exp(genomes.reduce((s,x)=>s+Math.log(Math.max(GENE_MIN,x[key])),0)/genomes.length);
+    g[key] = +m.toFixed(4);
+  });
+  return g;
+}
+function freshState(baseGenome, config){
+  const S = { schema:2, config: Object.assign({}, DEFAULTS, config||{}) };
+  return Object.assign(S, {
+    champion: clone(baseGenome), championAge: 0, promotions: 0,
+    gen: 1, mean: clone(baseGenome), sigma: S.config.SIGMA0,
+    phase: 'search', rung: 0, candIdx: 0,
+    candidates: [],           // [{genome, active, seedsDone, cW, kW, shares:[]}]
+    confirm: null,            // {genome, seedsDone, cW, kW, shares:[]}
+    history: [],              // per-generation summaries
+    totalGames: 0,
+  });
+}
+function migrate(S, logFn){ // v1 (pre-rung) -> v2: keep the run, restart the open generation
+  if(S.schema>=2) return S;
+  S.schema = 2; S.config = Object.assign({}, DEFAULTS);
+  S.rung = 0; S.phase = 'search'; S.candidates = []; S.candIdx = 0; S.confirm = null;
+  (S.history||[]).forEach(h=>{ if(h.challenged && !h.confirm) h.challenged=false; }); // no orphaned confirms
+  logFn('state migrated v1 -> v2 (rung schedule): champion, history and ES state kept; in-progress generation restarted');
+  return S;
+}
+function evalRec(genome){ return {genome, active:true, seedsDone:0, cW:0, kW:0, shares:[]}; }
+function shareOf(rec){ return clusterStat(rec.shares); }
+function commitBlock(S, rec, res){ // apply one seed block's result (in seed order)
+  rec.cW += res.cW; rec.kW += res.kW;
+  rec.shares.push((res.cW+res.kW)>0 ? res.cW/(res.cW+res.kW) : null);
+  rec.seedsDone++;
+  S.totalGames += 6;
+}
+// needsGames: what the run wants next — {rec, seedOf(i)} or null (advance() first).
+function needsGames(S){
+  const C = cfg(S);
+  if(S.phase==='confirm'){
+    const rec = S.confirm;
+    if(rec.seedsDone < C.CONFIRM_SEEDS) return { rec, target:C.CONFIRM_SEEDS, seedOf:i=>CONFIRM_SEED_BASE + S.gen*C.CONFIRM_SEEDS + i };
+    return null;
+  }
+  if(!S.candidates.length) return null;
+  const rec = S.candidates[S.candIdx];
+  const target = C.RUNG_SEEDS[S.rung];
+  if(rec && rec.active && rec.seedsDone < target) return { rec, target, seedOf:i=>(S.gen-1)*C.RUNG_SEEDS[C.RUNG_SEEDS.length-1] + i };
+  return null;
+}
+// advance: perform every state transition that needs NO games. Returns when
+// needsGames(S) is non-null or the generation counter passed maxGen.
+function advance(S, logFn){
+  const C = cfg(S);
+  for(;;){
+    if(S.phase==='confirm'){
+      const rec = S.confirm;
+      if(rec.seedsDone < C.CONFIRM_SEEDS) return;
+      const st = shareOf(rec);
+      const win = st.m - st.ci > 0.5;
+      const h = S.history[S.history.length-1];
+      h.confirm = {share:+st.m.toFixed(4), ci:+st.ci.toFixed(4), games:C.CONFIRM_SEEDS*6};
+      h.promoted = win;
+      if(win){
+        S.champion = clone(rec.genome); S.championAge = 0; S.promotions++;
+        logFn('gen '+S.gen+': PROMOTED — confirmed '+pct(st.m)+' ± '+pct(st.ci)+' over '+(C.CONFIRM_SEEDS*6)+' fresh paired games');
+      } else {
+        S.championAge++;
+        logFn('gen '+S.gen+': challenge REJECTED at confirmation — '+pct(st.m)+' ± '+pct(st.ci)+' (winner\'s curse caught by the gate)');
+      }
+      S.phase='search'; S.confirm=null; S.gen++; S.rung=0; S.candidates=[]; S.candIdx=0;
+      continue;
+    }
+    if(!S.candidates.length){
+      for(let k=0;k<C.LAMBDA;k++) S.candidates.push(evalRec(sampleCandidate(S.mean, S.sigma, S.gen, k)));
+      S.candIdx = 0; S.rung = 0;
+    }
+    const target = C.RUNG_SEEDS[S.rung];
+    const rec = S.candidates[S.candIdx];
+    if(rec && rec.active && rec.seedsDone < target) return; // games wanted here
+    // move to the next active candidate still short of this rung's target
+    const nxt = S.candidates.findIndex((r,i)=> i>S.candIdx && r.active && r.seedsDone<target);
+    if(nxt>=0){ S.candIdx = nxt; continue; }
+    const anyShort = S.candidates.some(r=>r.active && r.seedsDone<target);
+    if(anyShort){ S.candIdx = S.candidates.findIndex(r=>r.active && r.seedsDone<target); continue; }
+    // rung complete
+    if(S.rung < C.RUNG_SEEDS.length-1){
+      const ranked = S.candidates.filter(r=>r.active).map(r=>({r, s:shareOf(r)})).sort((a,b)=>b.s.m-a.s.m);
+      ranked.slice(C.RUNG_KEEP[S.rung]).forEach(x=>{ x.r.active = false; });
+      logFn('gen '+S.gen+' rung '+S.rung+': cut to '+C.RUNG_KEEP[S.rung]+' of '+ranked.length+' (screen leader '+pct(ranked[0].s.m)+')');
+      S.rung++; S.candIdx = S.candidates.findIndex(r=>r.active);
+      continue;
+    }
+    // generation complete
+    const survivors = S.candidates.filter(r=>r.active).map(r=>({r, s:shareOf(r)})).sort((a,b)=>b.s.m-a.s.m);
+    const best = survivors[0];
+    S.mean = geoMean(survivors.slice(0, Math.min(C.MU, survivors.length)).map(x=>x.r.genome));
+    // step-size rule: count only *significant* winners — under paired mirroring a
+    // neutral candidate sits at ~50% by construction, so raw >50% counts would
+    // inflate sigma in flat terrain (null rate of m-ci>0.5 is ~2.5%, target 20%)
+    const all = S.candidates.map(r=>shareOf(r));
+    const beat = all.filter(s=>s.m - s.ci > 0.5).length/S.candidates.length;
+    S.sigma = Math.min(C.SIGMA_MAX, Math.max(C.SIGMA_MIN, S.sigma*Math.exp((beat-0.2)*0.6)));
+    const sig = best.s.m - best.s.ci > 0.5;
+    S.history.push({gen:S.gen, bestShare:+best.s.m.toFixed(4), bestCI:+best.s.ci.toFixed(4),
+                    beatFrac:+beat.toFixed(3), sigma:+S.sigma.toFixed(4), games:S.totalGames, challenged:sig, promoted:false});
+    logFn('gen '+S.gen+': best share '+pct(best.s.m)+' ± '+pct(best.s.ci)+' over '+C.RUNG_SEEDS[C.RUNG_SEEDS.length-1]+' seeds; '+
+                (sig ? 'CHALLENGE — confirming on fresh seeds' : 'champion holds (CI includes 50%)'));
+    if(sig){ S.phase='confirm'; S.confirm = evalRec(clone(best.r.genome)); continue; }
+    S.gen++; S.rung=0; S.candidates=[]; S.candIdx=0; S.championAge++;
+    // loop: next generation gets sampled on the next pass
+  }
+}
+// makeCommitBuffer: parallel executors complete blocks out of order; results must
+// commit in seed order for state files to stay bit-identical to sequential runs.
+// (Used by the browser worker pool; exercised by the parity test.)
+function makeCommitBuffer(S, rec){
+  return {
+    next: rec.seedsDone, buf: {},
+    push(idx, res){
+      this.buf[idx] = res;
+      while(this.buf[this.next] !== undefined){
+        commitBlock(S, rec, this.buf[this.next]);
+        delete this.buf[this.next]; this.next++;
+      }
+    }
+  };
+}
+</script>
+
+<script type="text/plain" id="pool-scheduler">
+/* Pool scheduler — dispatches seed blocks to workers and commits results in seed
+   order. Environment-agnostic on purpose: tests/trainer.parity.js drives it with
+   fake workers (randomized completion order, injected crashes) and asserts the run
+   is bit-identical to sequential AND that every seed is played exactly once.
+   env: { S (live state), workerCount, post(slot, job), log(msg),
+          checkpoint(force), stop() optional }.
+   Dispatch picks the exact set of missing seed indices (committed? buffered?
+   outstanding? -> next gap), so out-of-order completion can never cause duplicate
+   dispatch, and a recycled (errored) job's index simply becomes dispatchable again. */
+function makeScheduler(env){
+  const idleSlots = []; for(let i=0;i<env.workerCount;i++) idleSlots.push(i);
+  const pending = {}; let jobId = 0;
+  let buffer = null, bufferRec = null;
+  const outstanding = new Set();
+  let running = false;
+  function nextIdx(rec, target){
+    for(let i=rec.seedsDone; i<target; i++){
+      if(outstanding.has(i)) continue;
+      if(buffer && buffer.buf[i] !== undefined) continue;
+      return i;
+    }
+    return -1;
+  }
+  function dispatch(){
+    if(!running) return;
+    advance(env.S, env.log);
+    if(env.stop && env.stop()){ running = false; return; }
+    const need = needsGames(env.S);
+    if(!need){ env.checkpoint(true); return; }
+    if(bufferRec !== need.rec){ buffer = makeCommitBuffer(env.S, need.rec); bufferRec = need.rec; outstanding.clear(); }
+    while(idleSlots.length){
+      const i = nextIdx(need.rec, need.target);
+      if(i < 0) break;
+      const slot = idleSlots.pop();
+      const id = ++jobId;
+      pending[id] = { rec: need.rec, idx: i, slot };
+      outstanding.add(i);
+      env.post(slot, { type:'block', id, seed: need.seedOf(i), cand: need.rec.genome, champ: env.S.champion });
+    }
+  }
+  function onResult(m){
+    const p = pending[m.id];
+    if(!p){ env.log('scheduler: stray result for job '+m.id+' — ignored'); return; }
+    delete pending[m.id];
+    idleSlots.push(p.slot);
+    outstanding.delete(p.idx);
+    if(m.error) env.log('block error on seed idx '+p.idx+' (counted as undecided): '+m.error);
+    if(buffer && p.rec === bufferRec) buffer.push(p.idx, {cW:m.cW, kW:m.kW});
+    env.checkpoint(false);
+    dispatch();
+  }
+  function onWorkerError(slot, msg){ // recycle the slot; its in-flight indices become dispatchable again
+    let dropped = 0;
+    Object.keys(pending).forEach(id=>{
+      if(pending[id].slot===slot){ outstanding.delete(pending[id].idx); delete pending[id]; dropped++; }
+    });
+    if(idleSlots.indexOf(slot)<0) idleSlots.push(slot);
+    env.log('worker '+slot+' errored ('+msg+') — '+dropped+' block(s) recycled');
+    dispatch();
+  }
+  return {
+    start(){ if(!running){ running = true; dispatch(); } },
+    pause(){ running = false; },
+    onResult, onWorkerError,
+    inflight(){ return Object.keys(pending).length; },
+    idle(){ return idleSlots.length; },
+    isRunning(){ return running; },
+  };
+}
+</script>
+
+<script>
+(async function(){
+  const KEY = 'coastline_trainer_v1';
+  const $id = s=>document.getElementById(s);
+  let wakeLock = null, S = null, baseAI = null, sched = null;
+  let speed = '0', wdGames = -1, lastTickGames = 0, lastRenderT = 0;
+  const RENDER_MS = 250;
+
+  // deterministic Aussie heat names, unique within a generation (LAMBDA <= 24)
+  const NAMES = ['Davo','Robbo','Muzza','Gazza','Tezza','Wazza','Jacko','Thommo','Smitty','Deano','Johnno','Stevo','Macca','Chooka','Bluey','Dazza','Kezza','Rusty','Snowy','Boof','Curly','Spud','Wombat','Tiny'];
+  const nameOf = (gen,k)=> k<NAMES.length ? NAMES[(k + gen*7) % NAMES.length] : ('#'+(k+1));
+
+  function logLine(s){ const el = $id('log'); el.textContent += '\n'+s;
+    if(el.textContent.length > 40000) el.textContent = el.textContent.slice(-30000); // overnight cap
+    el.scrollTop = el.scrollHeight; }
+  function fatal(msg){ $id('fatal').style.display='block'; $id('fatal').textContent = 'ENGINE ERROR: '+msg; $id('runbadge').textContent='error'; }
+  const isRunning = ()=> !!(sched && sched.isRunning());
+
+  // shared logic + scheduler (verbatim twins of tests/trainer.body.js; see tests/trainer.parity.js)
+  eval($id('trainer-logic').textContent);
+  eval($id('pool-scheduler').textContent);
+
+  function renderRace(C){
+    const rows = S.candidates.map((r,k)=>{
+      const st = shareOf(r);
+      const share = isNaN(st.m) ? 0.5 : st.m;
+      const target = r.active ? C.RUNG_SEEDS[S.rung] : C.RUNG_SEEDS[0];
+      return {r, k, s:st, share, target};
+    });
+    const leader = rows.filter(x=>x.r.active).sort((a,b)=>b.share-a.share)[0];
+    $id('racemeta').textContent = !rows.length ? 'sampling the next generation…' :
+      'generation '+S.gen+' — '+(S.rung===0
+        ? 'heat 1: all '+C.LAMBDA+' race a '+C.RUNG_SEEDS[0]+'-seed screen, top '+C.RUNG_KEEP[0]+' survive'
+        : 'heat 2: '+C.RUNG_KEEP[0]+' finalists battle to '+C.RUNG_SEEDS[C.RUNG_SEEDS.length-1]+' seeds')+
+      ' · beat the 50% line to threaten the champion';
+    $id('race').innerHTML = rows.map(x=>{
+      const sig = !isNaN(x.s.m) && x.s.m - x.s.ci > 0.5;
+      const cls = 'lane'+(!x.r.active?' cut':(leader && x.k===leader.k?' leader':(sig?' sig':'')));
+      const icon = !x.r.active ? '✂ ' : (leader && x.k===leader.k ? '👑 ' : '');
+      const val = isNaN(x.s.m) ? '—' : pct(x.s.m)+' ±'+(isNaN(x.s.ci)?'—':(x.s.ci*100).toFixed(0));
+      return '<div class="'+cls+'">'+
+        '<span class="nm">'+icon+nameOf(S.gen,x.k)+'</span>'+
+        '<span class="seeds">'+x.r.seedsDone+'/'+x.target+'</span>'+
+        '<div class="track"><div class="mid"></div><div class="fill" style="width:'+(x.share*100).toFixed(1)+'%"></div></div>'+
+        '<span class="val">'+val+'</span></div>';
+    }).join('');
+  }
+  function renderFight(C){
+    const on = S.phase==='confirm' && S.confirm;
+    $id('fight').style.display = on ? 'block' : 'none';
+    if(!on) return;
+    const st = shareOf(S.confirm);
+    const share = isNaN(st.m) ? 0.5 : st.m;
+    const survivors = S.candidates.map((r,k)=>({r,k,s:shareOf(r)})).filter(x=>x.r.active).sort((a,b)=>b.s.m-a.s.m);
+    $id('fightname').textContent = survivors.length ? nameOf(S.gen, survivors[0].k) : 'Challenger';
+    $id('fightfill').style.width = (share*100).toFixed(1)+'%';
+    $id('fightnum').textContent = isNaN(st.m) ? '…' : pct(st.m)+' ± '+pct(st.ci||0);
+    $id('fightsub').textContent = 'seed '+S.confirm.seedsDone+'/'+C.CONFIRM_SEEDS+' — needs the whole CI above 50% to take the title';
+  }
+  function renderSpark(){
+    const cv = $id('spark'), ctx = cv.getContext('2d');
+    ctx.clearRect(0,0,cv.width,cv.height);
+    const H = S.history; if(!H.length) return;
+    const n = H.length, w = cv.width, h = cv.height, pad = 6;
+    const y = v => h-pad - Math.max(0, Math.min(1, (v-0.40)/0.25))*(h-2*pad); // 40%..65% window
+    ctx.strokeStyle = '#2a3644'; ctx.beginPath(); ctx.moveTo(0, y(0.5)); ctx.lineTo(w, y(0.5)); ctx.stroke();
+    ctx.strokeStyle = '#3a76c4'; ctx.lineWidth = 2; ctx.beginPath();
+    H.forEach((hh,i)=>{ const px = n===1 ? w/2 : pad + i*(w-2*pad)/(n-1); i?ctx.lineTo(px,y(hh.bestShare)):ctx.moveTo(px,y(hh.bestShare)); });
+    ctx.stroke();
+    H.forEach((hh,i)=>{
+      if(!hh.challenged) return;
+      const px = n===1 ? w/2 : pad + i*(w-2*pad)/(n-1);
+      ctx.fillStyle = hh.promoted ? '#f4c95d' : '#ff6b6b';
+      ctx.beginPath(); ctx.arc(px, y(hh.bestShare), 4, 0, 7); ctx.fill();
+    });
+  }
+  function render(force){
+    if(!S) return;
+    const now = Date.now();
+    if(!force && now-lastRenderT < RENDER_MS) return;
+    lastRenderT = now;
+    const C = cfg(S);
+    $id('s_gen').textContent = S.gen;
+    $id('s_promo').textContent = S.promotions;
+    $id('s_sigma').textContent = S.sigma.toFixed(3);
+    $id('s_games').textContent = S.totalGames.toLocaleString();
+    $id('s_speed').textContent = isRunning() ? speed : '⏸';
+    $id('champline').textContent = S.promotions===0
+      ? '🏆 The original genome has defended the title for '+S.championAge+' generation'+(S.championAge===1?'':'s')
+      : '🏆 Champion crowned in a title fight — '+S.promotions+' promotion'+(S.promotions===1?'':'s')+' so far, current reign '+S.championAge+' generation'+(S.championAge===1?'':'s');
+    renderRace(C); renderFight(C); renderSpark();
+    $id('hist').innerHTML = S.history.slice(-14).map(h=>{
+      const conf = h.confirm ? pct(h.confirm.share)+' ± '+pct(h.confirm.ci) : (h.challenged ? 'running…' : '—');
+      const out = h.promoted ? '<td class="win">🏆 NEW CHAMPION</td>' : (h.confirm ? '<td class="rej">challenge rejected</td>' : (h.challenged ? '<td>🥊 fighting…</td>' : '<td>champion holds</td>'));
+      return '<tr><td>'+h.gen+'</td><td>'+pct(h.bestShare)+' ± '+pct(h.bestCI)+'</td><td>'+conf+'</td>'+out+'</tr>';
+    }).reverse().join('');
+  }
+  let lastSaveT = 0;
+  function checkpoint(force){
+    const now = Date.now();
+    if(force || now-lastSaveT>=1000){
+      lastSaveT = now;
+      try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){}
+    }
+    render(force);
+  }
+
+  /* speed ticker + stall watchdog — always honest, even when nothing moves */
+  let lastTickT = Date.now();
+  setInterval(()=>{
+    if(!S) return;
+    const now = Date.now(); // real elapsed — background tabs throttle timers, so never assume 2s
+    speed = Math.round((S.totalGames - lastTickGames)/Math.max(0.5,(now-lastTickT)/1000)).toLocaleString();
+    lastTickGames = S.totalGames; lastTickT = now;
+    render(true);
+  }, 2000);
+  setInterval(()=>{
+    if(!S || !isRunning()) { wdGames = S ? S.totalGames : -1; return; }
+    if(S.totalGames===wdGames){
+      if(sched.inflight()===0){
+        logLine('watchdog: no progress, nothing in flight (gen '+S.gen+', phase '+S.phase+', '+sched.idle()+' idle workers) — kicking the dispatcher');
+        sched.start();
+      } else {
+        logLine('watchdog: '+sched.inflight()+' block(s) in flight but no commits for 10s — if a worker died, its blocks recycle on the error event');
+      }
+    }
+    wdGames = S.totalGames;
+  }, 10000);
+
+  async function setWake(on){
+    try{
+      if(on && 'wakeLock' in navigator){ wakeLock = await navigator.wakeLock.request('screen'); $id('wakebadge').textContent='wake lock on'; $id('wakebadge').className='badge on';
+        wakeLock.addEventListener('release', ()=>{ $id('wakebadge').textContent='wake lock off'; $id('wakebadge').className='badge'; });
+      } else if(!on && wakeLock){ await wakeLock.release(); wakeLock=null; }
+    }catch(e){ $id('wakebadge').textContent='wake lock unavailable'; }
+  }
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && isRunning()) setWake(true); });
+
+  /* ---- boot the pool ---- */
+  const engine = await (async ()=>{
+    const html = await (await fetch('index.html', {cache:'no-store'})).text();
+    return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]).join('\n;\n');
+  })().catch(e=>{ fatal('could not fetch index.html — open this page from the deployed site, not file://'); return null; });
+  if(!engine) return;
+
+  const boot = $id('worker-boot').textContent, core = $id('worker-core').textContent;
+  const N = Math.max(1, (navigator.hardwareConcurrency||4) - 1);
+  const workers = [];
+  let readyCount = 0;
+  const env = { S:null, workerCount:N, post:(slot,job)=>workers[slot].postMessage(job), log:logLine, checkpoint };
+  sched = makeScheduler(env);
+
+  for(let i=0;i<N;i++){
+    const slot = i;
+    const w = new Worker(URL.createObjectURL(new Blob([boot], {type:'text/javascript'})));
+    w.onmessage = (e)=>{
+      const m = e.data;
+      if(m.type==='fatal'){ fatal(m.msg); return; }
+      if(m.type==='ready'){
+        baseAI = baseAI || m.AI_W;
+        readyCount++;
+        $id('poolbadge').textContent = readyCount+'/'+N+' workers';
+        if(readyCount===N){
+          let saved = null;
+          try{ saved = JSON.parse(localStorage.getItem(KEY) || 'null'); }catch(err){}
+          S = saved ? migrate(saved, logLine) : freshState(baseAI, null);
+          env.S = S; lastTickGames = S.totalGames;
+          $id('runbadge').textContent = saved ? 'resumed checkpoint' : 'fresh run';
+          $id('startbtn').disabled = false;
+          logLine('pool ready: '+N+' engine workers'+(saved?' — checkpoint resumed at gen '+S.gen+' ('+S.totalGames.toLocaleString()+' games)':''));
+          render(true);
+        }
+        return;
+      }
+      if(m.type==='res') sched.onResult(m);
+    };
+    w.onerror = (e)=>{ e.preventDefault && e.preventDefault(); sched.onWorkerError(slot, (e && e.message) || 'uncaught error'); };
+    w.postMessage({type:'boot', engine, core});
+    workers.push(w);
+  }
+
+  /* ---- controls ---- */
+  $id('startbtn').onclick = ()=>{ $id('startbtn').disabled=true; $id('pausebtn').disabled=false; $id('runbadge').textContent='training…'; setWake(true); sched.start(); render(true); };
+  $id('pausebtn').onclick = ()=>{ sched.pause(); $id('startbtn').disabled=false; $id('pausebtn').disabled=true; $id('runbadge').textContent='pausing (letting in-flight games land)…'; setWake(false);
+    const waitDrain = setInterval(()=>{ if(sched.inflight()===0){ clearInterval(waitDrain); checkpoint(true); $id('runbadge').textContent='paused'; } }, 200); };
+  function download(name, obj){
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(obj)], {type:'application/json'}));
+    a.download = name; a.click();
+  }
+  $id('exportbtn').onclick = ()=>{ if(S) download('trainer-state.json', S); };
+  $id('champbtn').onclick = ()=>{ if(S) download('champion.json', S.champion); };
+  $id('importbtn').onclick = ()=>$id('importfile').click();
+  $id('importfile').onchange = (e)=>{
+    const f = e.target.files[0]; if(!f) return;
+    const r = new FileReader();
+    r.onload = ()=>{ try{
+      const st = JSON.parse(r.result);
+      if(!st.champion || !st.mean) throw new Error('not a trainer state file');
+      if(isRunning()){ logLine('pause before importing'); return; }
+      S = migrate(st, logLine); env.S = S; sched = makeScheduler(env); lastTickGames = S.totalGames;
+      checkpoint(true); logLine('state imported (gen '+S.gen+', '+S.totalGames.toLocaleString()+' games)');
+    }catch(err){ logLine('import failed: '+err.message); } };
+    r.readAsText(f);
+  };
+  $id('resetbtn').onclick = ()=>{
+    if(isRunning()){ logLine('pause before resetting'); return; }
+    if(!confirm('Reset the run? The current checkpoint and champion are discarded (export first if you want them).')) return;
+    localStorage.removeItem(KEY);
+    S = freshState(baseAI, null); env.S = S; sched = makeScheduler(env); lastTickGames = S.totalGames;
+    checkpoint(true); $id('runbadge').textContent='fresh run'; logLine('run reset');
+  };
+})();
+</script>
+</body>
+</html>
