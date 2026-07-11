@@ -1,0 +1,11 @@
+{
+  "name": "infinite-ai",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "test": "node tests/test.js",
+    "ladder": "node tests/ladder.js",
+    "trainer": "node tests/trainer.js",
+    "test:trainer": "node tests/trainer.parity.js"
+  }
+}
