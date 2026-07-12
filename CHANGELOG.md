@@ -1,5 +1,12 @@
 # infinite-ai — Changelog
 
+## v0.4.2 — 2026-07-12
+Guided self-play ~32% faster with BIT-IDENTICAL play (16-seed oracle: same winners, same turn counts, before vs after every change).
+- mctsChoose no longer regenerates the full move list per candidate per world: exec closures now re-fetch their cards from the target state (mcTake's return, `||c` preserving exact legacy semantics), making root moves clone-safe. Removes det*topK move-gens per contentious decision — and eliminates a latent cross-world card-aliasing hazard.
+- Shape-aware world cloning (mcCard/mcPlayer/mcWorld) replaces generic recursion in mctsChoose + determinize; tuneW shared read-only.
+- aiWildColor hoists the unseen census (colorSupply rebuilt it per colour); netValue reuses scratch buffers; mcClone is structural (no JSON round-trip).
+- Profiling honesty: instrumented wrappers flagged high-CALL functions, not high-COST ones — V8's sampling profiler (--prof) found the real hotspots. Lesson recorded.
+
 ## v0.4.1 — 2026-07-12
 Gen-2 training fixes (user-reported: gym showing -40% smarter than guessing).
 - Warm-start bug: mode switch sent reset-then-init, but init only loads weights into an EMPTY net — gen-2 actually began from random weights while claiming to warm-start from the champion. New 'load' message force-loads; mode switch uses it.

@@ -2898,11 +2898,16 @@ function aiPlayVis(card){
 function othersOf(idx){ return G.players.map((_,i)=>i).filter(i=>i!==idx); }
 function aiWildColor(p,c){
   const choices = c.t==='wild' ? c.colors : Object.keys(COLORS);
+  // hoisted census: colorSupply rebuilds unseenFor PER COLOUR — this was the
+  // hottest leaf in guided self-play (10 full board scans per wild, per world)
+  const un = unseenFor(G.turn);
+  const handP = {};
+  for(const h of p.hand) if(h.t==='prop') handP[h.color] = (handP[h.color]||0)+1;
   let best=null,score=-1;
   for(const col of choices){
     const n=countIn(p,col), size=COLORS[col].size;
     if(n>=size) continue;
-    const supplyOK = colorSupply(p,col,G.turn) >= (size-n-1);
+    const supplyOK = (un.m['p:'+col]||0) + (handP[col]||0) >= (size-n-1);
     const sc = (n===size-1?100:0) + n*3 + (supplyOK?2:-4);
     if(sc>score){score=sc;best=col;}
   }
@@ -3223,14 +3228,39 @@ function brainCandidates(p, idx, next){
 const MC = { det: 8, topK: 4, margin: 2.0, horizon: 16, netHorizon: 6, jsn: 1 }; // netHorizon applies only when a value net is loaded; jsn = search-based No Deal decisions
 let MC_ON = true; // headless genome training rebinds this off — Monte Carlo costs ~500x per game and the genome is consumed by both layers either way
 
-function mcClone(o){ return JSON.parse(JSON.stringify(o)); }
+function mcClone(o){ // structural clone (sim states are plain data)
+  if(o===null || typeof o!=='object') return o;
+  if(Array.isArray(o)){ const a=new Array(o.length); for(let i=0;i<o.length;i++) a[i]=mcClone(o[i]); return a; }
+  const r={}; for(const k in o) r[k]=mcClone(o[k]); return r;
+}
+/* shape-aware world clone — mctsChoose runs det*topK of these per contentious
+   decision; knowing the shape beats generic recursion. tuneW is shared by
+   reference (read-only genome). Cards are flat except .colors. */
+function mcCard(c){ const r = Object.assign({}, c); if(r.colors) r.colors = r.colors.slice(); return r; }
+function mcCards(a){ const out = new Array(a.length); for(let i=0;i<a.length;i++) out[i]=mcCard(a[i]); return out; }
+function mcPlayer(p){
+  const q = {};
+  for(const k in p){
+    const v = p[k];
+    if(k==='hand'||k==='bank') q[k] = mcCards(v);
+    else if(k==='props'){ const o={}; for(const col in v) o[col]=mcCards(v[col]); q[k]=o; }
+    else if(k==='bldg'){ const o={}; for(const col in v){ const b=v[col], nb={}; for(const bk in b) nb[bk]=b[bk]&&typeof b[bk]==='object'?mcCard(b[bk]):b[bk]; o[col]=nb; } q[k]=o; }
+    else if(k==='tuneW') q[k] = v; // shared read-only
+    else q[k] = (v && typeof v==='object') ? mcClone(v) : v;
+  }
+  return q;
+}
+function mcWorld(st){
+  return { players: st.players.map(mcPlayer), discard: mcCards(st.discard), deck: st.deck ? mcCards(st.deck) : st.deck,
+           turn: st.turn, playsLeft: st.playsLeft, turnCount: st.turnCount };
+}
 let MC_PROTO = null, MC_ID = 5000000;
 function mcProtoOf(kind){ // one template card per census kind, fresh ids per sample
   if(!MC_PROTO){ MC_PROTO = {}; buildDeck().forEach(c=>{ const k = keyOf(c); if(!MC_PROTO[k]) MC_PROTO[k] = JSON.parse(JSON.stringify(c)); }); }
   const c = JSON.parse(JSON.stringify(MC_PROTO[kind])); c.id = ++MC_ID; return c;
 }
 function determinize(selfIdx){ // a full world consistent with everything this seat can see
-  const st = { players: mcClone(G.players), discard: mcClone(G.discard),
+  const st = { players: G.players.map(mcPlayer), discard: mcCards(G.discard),
                turn: G.turn, playsLeft: G.playsLeft, turnCount: G.turnCount };
   const un = unseenFor(selfIdx);
   const pool = [];
@@ -3343,7 +3373,7 @@ function mcMoves(st, idx){
     if(seen.has(kk)) return; seen.add(kk);
 
     if(c.t==='prop') add(progressGain(me, c.color), { cardId:c.id, mode:'play', plays:1,
-      exec(s){ const q=s.players[idx]; mcTake(q,c.id); if(!q.props[c.color]) q.props[c.color]=[]; q.props[c.color].push(c); } });
+      exec(s){ const q=s.players[idx]; const cc=mcTake(q,c.id)||c; if(!q.props[c.color]) q.props[c.color]=[]; q.props[c.color].push(cc); } });
 
     if(c.t==='wild'||c.t==='wildall'){
       const col = aiWildColor(me, c);
@@ -3351,7 +3381,7 @@ function mcMoves(st, idx){
         const need = COLORS[col].size - countIn(me,col) - 1;
         const odds = colorSupply(me, col, idx) >= need ? 1 : W.wild_dead;
         add(progressGain(me,col)*odds*0.95, { cardId:c.id, mode:'play', plays:1,
-          exec(s){ const q=s.players[idx]; mcTake(q,c.id); if(!q.props[col]) q.props[col]=[]; q.props[col].push(c); } });
+          exec(s){ const q=s.players[idx]; const cc=mcTake(q,c.id)||c; if(!q.props[col]) q.props[col]=[]; q.props[col].push(cc); } });
       }
     }
 
@@ -3366,8 +3396,8 @@ function mcMoves(st, idx){
         const collect = amt => targets.reduce((s,t)=>s+jsnLite(Math.min(amt, liq(st.players[t]))*W.rent_eff, t), 0);
         const mkExec = mult => function(s){
           const q = s.players[idx];
-          mcTake(q,c.id); s.discard.push(c);
-          if(mult>1 && hikeCard){ mcTake(q,hikeCard.id); s.discard.push(hikeCard); }
+          s.discard.push(mcTake(q,c.id)||c);
+          if(mult>1 && hikeCard){ s.discard.push(mcTake(q,hikeCard.id)||hikeCard); }
           const cs = c.t==='rent' ? c.colors : Object.keys(q.props);
           let best = 0; cs.forEach(col=>{ best = Math.max(best, rentFor(q,col)); });
           targets.forEach(t=>{
@@ -3395,7 +3425,7 @@ function mcMoves(st, idx){
           add(ev, { cardId:c.id, mode:'play', plays:1,
             exec(s){
               const q = s.players[idx];
-              mcTake(q,c.id); s.discard.push(c);
+              s.discard.push(mcTake(q,c.id)||c);
               if(mcBlocked(s, best.t, idx, 14, true)) return;
               const from = s.players[best.t];
               const cards = (from.props[best.col]||[]).splice(0);
@@ -3420,7 +3450,7 @@ function mcMoves(st, idx){
         if(best) add(best.ev, { cardId:c.id, mode:'play', plays:1,
           exec(s){
             const q = s.players[idx];
-            mcTake(q,c.id); s.discard.push(c);
+            s.discard.push(mcTake(q,c.id)||c);
             if(mcBlocked(s, best.t, idx, 6, false)) return;
             const tp = s.players[best.t], arr = tp.props[best.color];
             const i = arr ? arr.findIndex(cc=>cc.id===best.id) : -1;
@@ -3449,7 +3479,7 @@ function mcMoves(st, idx){
         if(best) add(best.ev, { cardId:c.id, mode:'play', plays:1,
           exec(s){
             const q = s.players[idx];
-            mcTake(q,c.id); s.discard.push(c);
+            s.discard.push(mcTake(q,c.id)||c);
             if(mcBlocked(s, best.t, idx, 4, false)) return;
             const tp = s.players[best.t];
             const ta = tp.props[best.color]; const ti = ta?ta.findIndex(cc=>cc.id===best.id):-1;
@@ -3465,30 +3495,30 @@ function mcMoves(st, idx){
       if(c.kind==='favour'){
         const t = enemies.slice().sort((a,b)=>liq(st.players[b])-liq(st.players[a]))[0];
         add(jsnLite(Math.min(5, liq(st.players[t]))*0.85, t), { cardId:c.id, mode:'play', plays:1,
-          exec(s){ const q=s.players[idx]; mcTake(q,c.id); s.discard.push(c);
+          exec(s){ const q=s.players[idx]; s.discard.push(mcTake(q,c.id)||c);
             if(!mcBlocked(s, t, idx, 5, false)) mcPay(s, t, idx, 5); } });
       }
       if(c.kind==='shout'){
         const ev = enemies.reduce((s,t)=>s+jsnLite(Math.min(2, liq(st.players[t]))*0.85, t), 0);
         add(ev, { cardId:c.id, mode:'play', plays:1,
-          exec(s){ const q=s.players[idx]; mcTake(q,c.id); s.discard.push(c);
+          exec(s){ const q=s.players[idx]; s.discard.push(mcTake(q,c.id)||c);
             enemies.forEach(t=>{ if(!mcBlocked(s, t, idx, 2, false)) mcPay(s, t, idx, 2); }); } });
       }
       if(c.kind==='payday') add(W.pd_base + (me.hand.length<=3?W.pd_low:0) - (me.hand.length>=7?W.pd_high:0),
         { cardId:c.id, mode:'play', plays:1,
-          exec(s){ const q=s.players[idx]; mcTake(q,c.id); s.discard.push(c);
+          exec(s){ const q=s.players[idx]; s.discard.push(mcTake(q,c.id)||c);
             const a=mcDraw(s), b=mcDraw(s); if(a)q.hand.push(a); if(b)q.hand.push(b); } });
       if(c.kind==='granny'){
         const col = completeColors(me).find(cc=>cc!=='black' && !(me.bldg[cc]&&me.bldg[cc].granny));
         if(col) add(3.8, { cardId:c.id, mode:'play', plays:1,
           exec(s){ const q=s.players[idx]; const c2 = completeColors(q).find(cc=>cc!=='black' && !(q.bldg[cc]&&q.bldg[cc].granny));
-            mcTake(q,c.id); if(c2){ if(!q.bldg[c2]) q.bldg[c2]={}; q.bldg[c2].granny = c; } else s.discard.push(c); } });
+            const cc=mcTake(q,c.id)||c; if(c2){ if(!q.bldg[c2]) q.bldg[c2]={}; q.bldg[c2].granny = cc; } else s.discard.push(cc); } });
       }
       if(c.kind==='resort'){
         const col = completeColors(me).find(cc=>me.bldg[cc]&&me.bldg[cc].granny&&!me.bldg[cc].resort);
         if(col) add(4.2, { cardId:c.id, mode:'play', plays:1,
           exec(s){ const q=s.players[idx]; const c2 = completeColors(q).find(cc=>q.bldg[cc]&&q.bldg[cc].granny&&!q.bldg[cc].resort);
-            mcTake(q,c.id); if(c2) q.bldg[c2].resort = c; else s.discard.push(c); } });
+            const cc=mcTake(q,c.id)||c; if(c2) q.bldg[c2].resort = cc; else s.discard.push(cc); } });
       }
     }
   });
@@ -3576,9 +3606,10 @@ function featuresOf(st, idx){
 }
 let VALUE_NET = null; // {h1,h2,W1,b1,W2,b2,W3,b3} — plain arrays, loaded via loadValueNet
 function loadValueNet(w){ VALUE_NET = w; }
+const NV_H1 = new Float64Array(64), NV_H2 = new Float64Array(64); // scratch: netValue is the inner loop
 function netValue(st, idx){ // P(idx wins) per the loaded net
   const w = VALUE_NET, x = featuresOf(st, idx);
-  const h1 = new Array(w.h1), h2 = new Array(w.h2);
+  const h1 = NV_H1, h2 = NV_H2;
   for(let j=0;j<w.h1;j++){
     let a = w.b1[j];
     const off = j*FEAT_N;
@@ -3665,11 +3696,9 @@ function mctsChoose(idx, C){
       const wantHike = /\+ Hike/.test(cand.label||'');
       const mv = rootMoves.find(m=>m.cardId===cand.cardId && m.mode===cand.mode && !m.hike===!wantHike);
       if(!mv || mv.plays>world.playsLeft) continue;
-      const st = mcClone(world);
-      const mv2 = mcMoves(st, idx).find(m=>m.cardId===cand.cardId && m.mode===cand.mode && !m.hike===!wantHike);
-      if(!mv2) continue;
-      mv2.exec(st);
-      st.playsLeft -= mv2.plays;
+      const st = mcWorld(world);
+      mv.exec(st); // clone-safe: execs re-fetch their cards from the target state
+      st.playsLeft -= mv.plays;
       const w0 = mcWinner(st);
       score[a] += w0>=0 ? (w0===idx ? 1 : 0) : rolloutValue(st, idx);
       tried[a]++;
