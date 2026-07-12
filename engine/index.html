@@ -726,24 +726,24 @@ const COLORS = {
   gold:  {label:'Noosa',       hex:'#E8B93B', size:2, rent:[3,8]},
   teal:  {label:'Mooloolaba',  hex:'#1FA8A0', size:3, rent:[2,4,7]},
   coral: {label:'Maroochydore',hex:'#F26D5B', size:3, rent:[2,3,6]},
-  green: {label:'Buderim',     hex:'#3F9142', size:2, rent:[2,5]},
+  green: {label:'Buderim',     hex:'#3F9142', size:2, rent:[1,2]},
   purple:{label:'Caloundra',   hex:'#8E5EA8', size:3, rent:[1,2,4]},
   orange:{label:'Coolum',      hex:'#F08A24', size:3, rent:[1,3,5]},
   brown: {label:'Nambour',     hex:'#8A5A38', size:2, rent:[1,2]},
-  sky:   {label:'Kawana',      hex:'#5BB7E0', size:3, rent:[1,2,4]},
-  sage:  {label:'Hinterland',  hex:'#7C9A5C', size:3, rent:[1,3,5]},
-  black: {label:'Transport',   hex:'#2B2F33', size:4, rent:[1,2,3,5]},
+  sky:   {label:'Kawana',      hex:'#5BB7E0', size:3, rent:[1,2,3]},
+  sage:  {label:'Hinterland',  hex:'#7C9A5C', size:3, rent:[2,4,6]},
+  black: {label:'Transport',   hex:'#2B2F33', size:4, rent:[1,2,3,4]},
 };
 const PROPS = [
   ['gold','Hastings Street',4],['gold','Noosa Main Beach',4],
-  ['teal','The Spit',3],['teal','Mooloolaba Esplanade',3],['teal','The Wharf',3],
+  ['teal','The Spit',4],['teal','Mooloolaba Esplanade',4],['teal','The Wharf',4],
   ['coral','Ocean Street',3],['coral','Cotton Tree',3],['coral','Sunshine Plaza',3],
-  ['green','Buderim Village',3],['green','Buderim Falls',3],
+  ['green','Buderim Village',2],['green','Buderim Falls',2],
   ['purple','Kings Beach',2],['purple','Bulcock Street',2],['purple','Golden Beach',2],
   ['orange','Coolum Beach',2],['orange','Point Perry',2],['orange','Yaroomba',2],
   ['brown','Currie Street',1],['brown','Nambour Showgrounds',1],
-  ['sky','Point Cartwright',2],['sky','Bokarina Beach',2],['sky','Warana',2],
-  ['sage','Maleny',2],['sage','Montville',2],['sage','Mapleton',2],
+  ['sky','Point Cartwright',1],['sky','Bokarina Beach',1],['sky','Warana',1],
+  ['sage','Maleny',3],['sage','Montville',3],['sage','Mapleton',3],
   ['black','Bruce Highway',2],['black','Sunshine Motorway',2],
   ['black','Sunshine Coast Airport',2],['black','North Coast Rail',2],
 ];
@@ -755,17 +755,17 @@ const ACTIONS = {
   favour:  {n:'Call In a Favour', d:'One player pays you $5M', v:3, c:3},
   shout:   {n:'Shout a Round',    d:'Every player pays you $2M', v:2, c:3},
   payday:  {n:'Payday',           d:'Draw 2 extra cards', v:1, c:10},
-  granny:  {n:'Granny Flat',      d:'+$3M rent on a complete set (not Transport)', v:3, c:3},
+  granny:  {n:'Granny Flat',      d:'+$3M rent on a complete set (not Transport or Buderim)', v:3, c:3},
   resort:  {n:'Beach Resort',     d:'+$4M rent on a set with a Granny Flat', v:4, c:2},
   hike:    {n:'Rent Hike',        d:'Play with a Rent card to double it', v:1, c:2},
 };
 const MONEY = [[1,6],[2,5],[3,3],[4,3],[5,2],[10,1]];
-const DUAL_WILDS = [
-  [['gold','teal'],4,1],[['coral','sky'],2,2],[['orange','purple'],2,2],
-  [['green','sage'],3,1],[['brown','black'],1,1],[['teal','coral'],3,1],
-  [['sky','black'],2,1],
+const DUAL_WILDS = [ // official M-Deal pairings & values
+  [['gold','teal'],4,1],[['coral','sage'],3,2],[['orange','purple'],2,2],
+  [['green','black'],2,1],[['sky','brown'],1,1],[['black','teal'],4,1],
+  [['sky','black'],4,1],
 ];
-const RENT_DUALS = [['gold','teal'],['coral','sky'],['orange','purple'],['green','sage'],['brown','black']];
+const RENT_DUALS = [['gold','teal'],['coral','sage'],['orange','purple'],['green','black'],['brown','sky']]; // official set-pairs
 
 let CID = 0;
 function mk(c){ c.id = ++CID; return c; }
@@ -1783,7 +1783,7 @@ function buildZones(c){
     if(k==='swipe') oppEls.forEach(el=>{ const si=seatOfEl(el); if(stealTargetsOf(si).length) add(el, ()=>viewOppSelect(si,'swipe',c)); });
     if(k==='takeover') oppEls.forEach(el=>{ const si=seatOfEl(el); if(completeColors(G.players[si]).length) add(el, ()=>viewOppSelect(si,'takeover',c)); });
     if(k==='swap'){ if(propList(me()).some(x=>!isComplete(me(),x.color))) oppEls.forEach(el=>{ const si=seatOfEl(el); if(stealTargetsOf(si).length) add(el, ()=>viewOppSelect(si,'swapTheirs',c)); }); }
-    if(k==='granny') completeColors(me()).filter(col=>col!=='black' && !(me().bldg[col]&&me().bldg[col].granny)).forEach(col=>add(group(col), ()=>placeBldg(c,col,'granny')));
+    if(k==='granny') completeColors(me()).filter(col=>col!=='black' && col!=='green' && !(me().bldg[col]&&me().bldg[col].granny)).forEach(col=>add(group(col), ()=>placeBldg(c,col,'granny')));
     if(k==='resort') completeColors(me()).filter(col=>me().bldg[col]&&me().bldg[col].granny&&!me().bldg[col].resort).forEach(col=>add(group(col), ()=>placeBldg(c,col,'resort')));
     if(k==='nodeal') hint = 'No Deal! plays itself when you are attacked';
     else if(k==='hike') hint = 'Bank it — or play a Rent card and add the hike';
@@ -1990,7 +1990,7 @@ function openOptions(c){
       play('Play — steal a complete set','pick it on their board',()=>playActionVia(c,'takeover'), targets.length===0);
     }
     if(k==='granny'){
-      const sets = completeColors(me()).filter(col=>col!=='black' && !(me().bldg[col]&&me().bldg[col].granny));
+      const sets = completeColors(me()).filter(col=>col!=='black' && col!=='green' && !(me().bldg[col]&&me().bldg[col].granny));
       play('Play on a complete set','+$3M rent',()=>pickColor(sets,col=>placeBldg(c,col,'granny')), sets.length===0);
     }
     if(k==='resort'){
@@ -3199,7 +3199,7 @@ function brainCandidates(p, idx, next){
   // buildings
   const gr = p.hand.find(c=>c.t==='action'&&c.kind==='granny');
   if(gr){
-    const col = completeColors(p).find(c=>c!=='black'&&!p.bldg[c]?.granny);
+    const col = completeColors(p).find(c=>c!=='black'&&c!=='green'&&!p.bldg[c]?.granny);
     if(col) add(3.8, ()=>{ playFromHandAI(gr,p); if(!p.bldg[col])p.bldg[col]={}; p.bldg[col].granny=gr; log(p.name+' added a Granny Flat to '+COLORS[col].label+'.'); next(); }, {cardId:gr.id, mode:'play', label:'Granny Flat on '+COLORS[col].label});
   }
   const rs = p.hand.find(c=>c.t==='action'&&c.kind==='resort');
@@ -3509,9 +3509,9 @@ function mcMoves(st, idx){
           exec(s){ const q=s.players[idx]; s.discard.push(mcTake(q,c.id)||c);
             const a=mcDraw(s), b=mcDraw(s); if(a)q.hand.push(a); if(b)q.hand.push(b); } });
       if(c.kind==='granny'){
-        const col = completeColors(me).find(cc=>cc!=='black' && !(me.bldg[cc]&&me.bldg[cc].granny));
+        const col = completeColors(me).find(cc=>cc!=='black' && cc!=='green' && !(me.bldg[cc]&&me.bldg[cc].granny));
         if(col) add(3.8, { cardId:c.id, mode:'play', plays:1,
-          exec(s){ const q=s.players[idx]; const c2 = completeColors(q).find(cc=>cc!=='black' && !(q.bldg[cc]&&q.bldg[cc].granny));
+          exec(s){ const q=s.players[idx]; const c2 = completeColors(q).find(cc=>cc!=='black' && cc!=='green' && !(q.bldg[cc]&&q.bldg[cc].granny));
             const cc=mcTake(q,c.id)||c; if(c2){ if(!q.bldg[c2]) q.bldg[c2]={}; q.bldg[c2].granny = cc; } else s.discard.push(cc); } });
       }
       if(c.kind==='resort'){

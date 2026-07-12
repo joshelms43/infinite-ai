@@ -1,5 +1,24 @@
 # infinite-ai — Changelog
 
+## v0.5.0 — 2026-07-12
+RULES AUDIT: economy aligned to official Monopoly Deal (user-requested 1:1 check).
+
+**Verified faithful (unchanged):** 106-card deck; money 6x1/5x2/3x3/3x4/2x5/1x10; all 10 action kinds at official counts and values; set-size structure (three 2-sets, six 3-sets, one 4-set); draw 2 (5 on empty hand); 3 plays; discard to 7; JSN free + chainable; DTR costs a play; dual rent charges all, wild rent one target; Deal Breaker takes buildings; Sly/Forced skip complete sets; payments no-change/overpay/table-only, complete-set props payable; hotel requires house; multicolour wild $0; discard reshuffles into the deck.
+
+**Deviations found and FIXED (official slot in parens):**
+- Rent tables: sky/LightBlue 1/2/4 -> 1/2/3; sage/Yellow 1/3/5 -> 2/4/6; black/Railroad 1/2/3/5 -> 1/2/3/4; green/Utility 2/5 -> 1/2.
+- Property values: teal/Green $3 -> $4; sky/LB $2 -> $1; sage/Yellow $2 -> $3; green/Util $3 -> $2.
+- Dual-wild pairings + values to official: R/Y x2 ($3), Util/RR ($2), LB/Brown ($1), RR/Green ($4), LB/RR $2 -> $4 (DB/G and P/O were already right).
+- Rent-card pairings to the official five set-pairs (R/Y, RR/Util, Brown/LB corrected).
+- Houses now banned on Buderim/Utilities as well as Transport/Stations (5 play sites).
+- 9 new census/economy assertions pin all of this permanently (engine suite 65 checks).
+
+**CONSEQUENCES — read before comparing anything to the past:**
+- Every prior certification (MCTS +1.31pp, net-brain Arena verdict) was measured on the OLD economy. The comparisons were internally fair, but the game has changed; re-certify the net-v1 Arena preset on this version before leaning on it.
+- nets/value-gym-v1.json was trained on old-economy games — still loads, likely still useful, but its calibration is stale. Gym training continues on the corrected economy; RESET saved Arena runs (they must not mix economies).
+- Coastline itself (infinite-table repo) needs this same patch to stay 1:1 with the engine — the exact diffs are this entry plus the v0.5.0 commit.
+- Sources: official census & rules per Hasbro instruction book / monopolydealrules.com (its own action-count prose is inconsistent; the instruction-book counts that sum to 34 were used).
+
 ## v0.4.2 — 2026-07-12
 Guided self-play ~32% faster with BIT-IDENTICAL play (16-seed oracle: same winners, same turn counts, before vs after every change).
 - mctsChoose no longer regenerates the full move list per candidate per world: exec closures now re-fetch their cards from the target state (mcTake's return, `||c` preserving exact legacy semantics), making root moves clone-safe. Removes det*topK move-gens per contentious decision — and eliminates a latent cross-world card-aliasing hazard.

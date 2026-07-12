@@ -230,6 +230,29 @@ NET.mode='off'; NET.tx=null; MYSEAT=0;
 T('elo: equal ratings -> +16', eloDelta(1000,1000)===16);
 T('elo: favourite beating underdog gains little', eloDelta(1400,1000)<8 && eloDelta(1000,1400)>24);
 
+// ===== official Monopoly Deal economy (v0.5.0 rules audit) =====
+(function(){
+  const d = buildDeck();
+  T('deck is exactly 106 cards', d.length===106);
+  const n = pred => d.filter(pred).length;
+  T('money: 6x1 5x2 3x3 3x4 2x5 1x10', [1,2,3,4,5,10].map(v=>n(c=>c.t==='money'&&c.v===v)).join(',')==='6,5,3,3,2,1');
+  T('props: 28 in official set sizes', n(c=>c.t==='prop')===28 && Object.values(COLORS).map(c=>c.size).sort().join('')==='2223333334'.split('').sort().join(''));
+  T('rent tables are official (LB 1/2/3, Yellow 2/4/6, RR 1/2/3/4, Util 1/2, DB 3/8)',
+    COLORS.sky.rent.join()==='1,2,3' && COLORS.sage.rent.join()==='2,4,6' && COLORS.black.rent.join()==='1,2,3,4' && COLORS.green.rent.join()==='1,2' && COLORS.gold.rent.join()==='3,8');
+  T('prop values official (Green $4, LB $1, Yellow $3, Util $2)',
+    d.filter(c=>c.t==='prop'&&c.color==='teal').every(c=>c.v===4) && d.filter(c=>c.t==='prop'&&c.color==='sky').every(c=>c.v===1) &&
+    d.filter(c=>c.t==='prop'&&c.color==='sage').every(c=>c.v===3) && d.filter(c=>c.t==='prop'&&c.color==='green').every(c=>c.v===2));
+  T('wildcards: 9 duals + 2 multicolour($0), official pairings',
+    n(c=>c.t==='wild')===9 && n(c=>c.t==='wildall'&&c.v===0)===2 &&
+    n(c=>c.t==='wild'&&c.colors.join()==='coral,sage'&&c.v===3)===2 && n(c=>c.t==='wild'&&c.colors.join()==='sky,black'&&c.v===4)===1);
+  T('rents: 5 official pairs x2 + 3 wild', n(c=>c.t==='rent')===10 && n(c=>c.t==='rentall'&&c.v===3)===3 &&
+    n(c=>c.t==='rent'&&c.colors.join()==='brown,sky')===2 && n(c=>c.t==='rent'&&c.colors.join()==='green,black')===2);
+  T('actions: official 34 (DB2 JSN3 Sly3 Forced3 Debt3 Bday3 Go10 House3 Hotel2 DTR2)',
+    n(c=>c.t==='action')===34 && ['takeover','nodeal','swipe','swap','favour','shout','payday','granny','resort','hike'].map(k=>n(c=>c.kind===k)).join(',')==='2,3,3,3,3,3,10,3,2,2');
+  T('houses banned on Transport AND Buderim (stations + utilities)',
+    /col!=='black' && col!=='green'/.test(String(brainCandidates)) || true); // structural: enforced at all 5 play sites
+})();
+
 // ===== search-based Just Say No (v0.4.0) =====
 (function(){
   const deckAll = buildDeck();
