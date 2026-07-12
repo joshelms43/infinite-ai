@@ -1,0 +1,78 @@
+# infinite-ai value-net generation — unattended AlphaZero-lite training runs.
+# Actions → "value net" → Run workflow: plays self-play games for the requested
+# duration, trains the value MLP, and commits the weights + training report to the
+# branch. Certify the resulting net with the "engine ladder" workflow (net_file
+# input) before promoting anything.
+name: value net
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch to train on (weights are committed here)"
+        default: "main"
+        required: true
+      gen_minutes:
+        description: "Minutes of self-play data generation (~7k games/min)"
+        default: "90"
+        required: true
+      out:
+        description: "Weights file to write"
+        default: "nets/value-v1.json"
+        required: true
+      epochs:
+        default: "5"
+        required: true
+      mc_guided:
+        description: "true = search-guided self-play (~500x slower, generation-1+ data)"
+        default: "false"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: suites must be green before training
+        run: |
+          npm test
+          node tests/selfplay.js --sanity
+      - name: generate self-play data
+        run: |
+          MC_FLAG=""
+          if [ "${{ github.event.inputs.mc_guided }}" = "true" ]; then MC_FLAG="--mc"; fi
+          END=$(( $(date +%s) + ${{ github.event.inputs.gen_minutes }} * 60 ))
+          SEED=1
+          while [ $(date +%s) -lt $END ]; do
+            node tests/selfplay.js --gen /tmp/selfplay.bin --games 20000 --sample 0.15 --seed $SEED $MC_FLAG
+            SEED=$((SEED+1))
+          done
+      - name: train
+        run: |
+          node tests/selfplay.js --train /tmp/selfplay.bin --out ${{ github.event.inputs.out }} \
+            --epochs ${{ github.event.inputs.epochs }} | tee /tmp/train.log
+      - name: report + commit weights
+        run: |
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          mkdir -p nets
+          {
+            echo "# value-net training: ${STAMP}"
+            echo "- run: ${{ github.run_id }} | gen ${{ github.event.inputs.gen_minutes }}min | mc_guided ${{ github.event.inputs.mc_guided }}"
+            echo '```'
+            cat /tmp/train.log
+            echo '```'
+          } > "nets/${STAMP}-training.md"
+          cat "nets/${STAMP}-training.md" >> "$GITHUB_STEP_SUMMARY"
+          git config user.name "value-net[bot]"
+          git config user.email "value-net@users.noreply.github.com"
+          git add nets
+          git commit -m "value net: ${{ github.event.inputs.out }} (run ${{ github.run_id }}, ${{ github.event.inputs.gen_minutes }}min gen)"
+          git push origin HEAD:${{ github.event.inputs.ref }}

@@ -19,6 +19,10 @@ on:
         description: "Seed range a..b (b exclusive); 500 seeds = 3,000 paired games"
         default: "0..500"
         required: true
+      net_file:
+        description: "Optional value-net weights for the candidate (e.g. nets/value-v1.json); empty = none"
+        default: ""
+        required: false
 
 permissions:
   contents: write
@@ -42,8 +46,10 @@ jobs:
           node tests/trainer.parity.js
       - name: run the ladder
         run: |
+          NET_FLAG=""
+          if [ -n "${{ github.event.inputs.net_file }}" ]; then NET_FLAG="--net ${{ github.event.inputs.net_file }}"; fi
           node tests/ladder.js work ${{ github.event.inputs.baseline_ref }} \
-            --seeds ${{ github.event.inputs.seeds }} \
+            --seeds ${{ github.event.inputs.seeds }} $NET_FLAG \
             --out /tmp/ladder-run.jsonl
       - name: report
         run: |
@@ -55,6 +61,7 @@ jobs:
             echo
             echo "- run: ${{ github.run_id }} on $(date -u)"
             echo "- seeds: ${{ github.event.inputs.seeds }} (paired; 6 games per seed)"
+            echo "- net: ${{ github.event.inputs.net_file }}"
             echo "- candidate commit: $(git rev-parse --short HEAD)"
             echo
             echo '```'

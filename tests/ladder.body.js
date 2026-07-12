@@ -47,6 +47,7 @@
     else if(a==='--out') opts.out = argv[++i];
     else if(a==='--report') opts.report = argv[++i];
     else if(a==='--sanity') opts.sanity = true;
+    else if(a==='--net') opts.net = argv[++i];
     else opts.specs.push(a);
   }
 
@@ -67,7 +68,8 @@
       'AI_W: typeof AI_W!=="undefined" ? AI_W : null,'+
       'aiStep: typeof aiStep==="function" ? aiStep : null,'+
       'aiShouldJSN: typeof aiShouldJSN==="function" ? aiShouldJSN : null,'+
-      'keepScore: typeof keepScore==="function" ? keepScore : null'+
+      'keepScore: typeof keepScore==="function" ? keepScore : null,'+
+      'loadValueNet: typeof loadValueNet==="function" ? loadValueNet : null'+
       '};})()');
     ['AI_W','aiStep','aiShouldJSN','keepScore'].forEach(k=>{
       if(!brain[k]) throw new Error('ladder: version "'+spec+'" is missing '+k);
@@ -197,6 +199,12 @@
   brains.forEach((b,i)=>{ // duplicate specs (e.g. a self-match) must stay distinguishable in win attribution
     if(brains.some((o,j)=>j!==i && o.name===b.name)) b.name = b.name+'#'+(i+1);
   });
+  if(opts.net){ // arm every working-tree brain with the value net (frozen refs stay as shipped)
+    const w = JSON.parse(fs.readFileSync(opts.net,'utf8'));
+    let armed = 0;
+    brains.forEach(b=>{ if(b.name.startsWith('work') && b.loadValueNet){ b.loadValueNet(w); armed++; } });
+    console.log('value net '+opts.net+' loaded into '+armed+' work brain(s)');
+  }
   if(opts.sanity){ sanity(brains[0], brains[1]); return; }
 
   const mm = /^(\d+)\.\.(\d+)$/.exec(opts.seeds);

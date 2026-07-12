@@ -3219,7 +3219,7 @@ function brainCandidates(p, idx, next){
    decisions skip all of this and stay greedy (and instant). Uses Math.random
    throughout, so seeded harness runs stay deterministic. Execution still goes
    through the interactive candidate closures — selection changes, rules never. */
-const MC = { det: 8, topK: 4, margin: 2.0, horizon: 16 };
+const MC = { det: 8, topK: 4, margin: 2.0, horizon: 16, netHorizon: 6 }; // netHorizon applies only when a value net is loaded
 let MC_ON = true; // headless genome training rebinds this off — Monte Carlo costs ~500x per game and the genome is consumed by both layers either way
 
 function mcClone(o){ return JSON.parse(JSON.stringify(o)); }
@@ -3461,6 +3461,97 @@ function mcMoves(st, idx){
 
   return moves;
 }
+/* ---------- learned value function (AlphaZero-lite, v0.2.0) ----------
+   A tiny MLP estimates P(seat wins) from a fixed 56-feature summary of a position.
+   The SAME code serves three roles: featurising self-play games for training data
+   (tests/selfplay.js --gen), evaluating the trained net (--eval), and — once a net
+   is loaded via loadValueNet() — replacing the long rollout horizon in the Monte
+   Carlo brain: rollouts stop after MC.netHorizon half-turns and ask the net who is
+   winning, which makes search 3–5x cheaper per world at equal-or-better accuracy.
+   No net loaded (VALUE_NET null) = behaviour identical to the certified champion.
+   Features are seat-relative (self, next player, next-but-one), use only public
+   information plus the seat's own hand, and are scaled to roughly [0,1]. */
+const FEAT_N = 56;
+function featuresOf(st, idx){
+  const x = new Array(FEAT_N).fill(0);
+  const n3 = st.players.length;
+  for(let s=0; s<3; s++){
+    const q = st.players[(idx+s)%n3];
+    const o = s*13;
+    const comp = completeColors(q);
+    let near = 0, prog = 0, started = 0, maxFrac = 0, maxRent = 0;
+    Object.keys(q.props).forEach(col=>{
+      const n = countIn(q,col), size = COLORS[col].size;
+      if(n>0) started++;
+      if(n<size && n===size-1) near++;
+      const fr = Math.min(1, n/size);
+      prog += fr; if(fr>maxFrac && n<size) maxFrac = fr;
+      const r = rentFor(q,col); if(r>maxRent) maxRent = r;
+    });
+    let g=0, rz=0;
+    Object.values(q.bldg||{}).forEach(b=>{ if(b.granny)g++; if(b.resort)rz++; });
+    x[o+0] = comp.length/3;
+    x[o+1] = near/3;
+    x[o+2] = propList(q).length/10;
+    x[o+3] = prog/6;
+    x[o+4] = started/10;
+    x[o+5] = maxFrac;
+    x[o+6] = bankTotal(q)/20;
+    x[o+7] = q.bank.length/8;
+    x[o+8] = payAssetsTotal(q)/25;
+    x[o+9] = q.hand.length/7;
+    x[o+10] = g/2;
+    x[o+11] = rz/2;
+    x[o+12] = maxRent/16;
+  }
+  const me = st.players[idx];
+  let rent=0, rentall=0, moneyV=0, moneyN=0, atk=0, nds=0, wilds=0, propsH=0, pds=0, hikes=0, cash=0, bldgs=0;
+  me.hand.forEach(c=>{
+    if(c.t==='rent') rent++;
+    else if(c.t==='rentall') rentall++;
+    else if(c.t==='money'){ moneyV+=c.v; moneyN++; }
+    else if(c.t==='wild'||c.t==='wildall') wilds++;
+    else if(c.t==='prop') propsH++;
+    else if(c.t==='action'){
+      if(c.kind==='takeover'||c.kind==='swipe'||c.kind==='swap') atk++;
+      else if(c.kind==='nodeal') nds++;
+      else if(c.kind==='payday') pds++;
+      else if(c.kind==='hike') hikes++;
+      else if(c.kind==='favour'||c.kind==='shout') cash++;
+      else if(c.kind==='granny'||c.kind==='resort') bldgs++;
+    }
+  });
+  x[39]=rent/3; x[40]=rentall/3; x[41]=moneyV/15; x[42]=moneyN/6; x[43]=atk/4;
+  x[44]=nds/3; x[45]=wilds/4; x[46]=propsH/6; x[47]=pds/3; x[48]=hikes/2;
+  x[49]=cash/6; x[50]=bldgs/2;
+  x[51]=(st.playsLeft||0)/3;
+  x[52]=Math.min(1,(st.turnCount||0)/20);
+  x[53]=(st.deck?st.deck.length:0)/106;
+  x[54]=(st.discard?st.discard.length:0)/106;
+  x[55]=1; // constant input
+  return x;
+}
+let VALUE_NET = null; // {h1,h2,W1,b1,W2,b2,W3,b3} — plain arrays, loaded via loadValueNet
+function loadValueNet(w){ VALUE_NET = w; }
+function netValue(st, idx){ // P(idx wins) per the loaded net
+  const w = VALUE_NET, x = featuresOf(st, idx);
+  const h1 = new Array(w.h1), h2 = new Array(w.h2);
+  for(let j=0;j<w.h1;j++){
+    let a = w.b1[j];
+    const off = j*FEAT_N;
+    for(let i=0;i<FEAT_N;i++) a += w.W1[off+i]*x[i];
+    h1[j] = a>0?a:0;
+  }
+  for(let j=0;j<w.h2;j++){
+    let a = w.b2[j];
+    const off = j*w.h1;
+    for(let i=0;i<w.h1;i++) a += w.W2[off+i]*h1[i];
+    h2[j] = a>0?a:0;
+  }
+  let a = w.b3[0];
+  for(let i=0;i<w.h2;i++) a += w.W3[i]*h2[i];
+  return 1/(1+Math.exp(-a));
+}
 function mcWinner(st){ // 3 sets wins; at the horizon the leader takes it
   for(let i=0;i<st.players.length;i++) if(completeColors(st.players[i]).length>=3) return i;
   return -1;
@@ -3475,8 +3566,20 @@ function mcLeader(st){
   });
   return best;
 }
-function rollout(st){ // synchronous fast game from a determinized state; resumes the current turn
-  for(let half=0; half<MC.horizon; half++){
+function rolloutValue(st, persp){ // P(persp wins): play forward, then real result / net / leader proxy
+  const cap = VALUE_NET ? MC.netHorizon : MC.horizon;
+  const w = rollout(st, cap);
+  if(w>=0) return w===persp ? 1 : 0;
+  if(VALUE_NET){
+    const ps = [netValue(st,0), netValue(st,1), netValue(st,2)];
+    const sum = ps[0]+ps[1]+ps[2];
+    return sum>0 ? ps[persp]/sum : 1/3;
+  }
+  const L = mcLeader(st);
+  return L===persp ? 1 : (L<0 ? 1/3 : 0);
+}
+function rollout(st, cap){ // synchronous fast game from a determinized state; resumes the current turn
+  for(let half=0; half<(cap||MC.horizon); half++){
     const idx = st.turn, p = st.players[idx];
     // one move-gen per turn, executed greedily — regenerating after every play costs
     // ~2x the whole rollout and rollouts are approximations by design. A card can
@@ -3503,7 +3606,7 @@ function rollout(st){ // synchronous fast game from a determinized state; resume
     for(let i=0;i<n;i++){ const c = mcDraw(st); if(c) np.hand.push(c); }
     st.playsLeft = 3;
   }
-  return mcLeader(st);
+  return -1; // undecided at the horizon — rolloutValue applies net or leader proxy
 }
 function mctsChoose(idx, C){
   if(!MC_ON) return null;
@@ -3524,8 +3627,8 @@ function mctsChoose(idx, C){
       if(!mv2) continue;
       mv2.exec(st);
       st.playsLeft -= mv2.plays;
-      const w = mcWinner(st)>=0 ? mcWinner(st) : rollout(st);
-      score[a] += (w===idx ? 1 : (w<0 ? 1/3 : 0));
+      const w0 = mcWinner(st);
+      score[a] += w0>=0 ? (w0===idx ? 1 : 0) : rolloutValue(st, idx);
       tried[a]++;
     }
   }

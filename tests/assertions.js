@@ -131,6 +131,27 @@ T('shared evaluator scores any player (bank + play candidates)',
   cands.some(x=>x.mode==='bank'&&x.cardId===96001) && cands.some(x=>x.mode==='play'&&x.cardId===96002) && cands.every(x=>x.ev>0));
 
 
+// ===== learned value function =====
+newGame();
+{
+  const f = featuresOf(G, 0);
+  T('featuresOf: FEAT_N finite, sanely scaled values', f.length===FEAT_N && f.every(v=>Number.isFinite(v) && v>=0 && v<=2));
+  T('featuresOf: deterministic', JSON.stringify(featuresOf(G,1))===JSON.stringify(featuresOf(G,1)));
+  const netPath = _P.join(__dirname,'..','nets','value-v1.json');
+  if(_F.existsSync(netPath)){
+    loadValueNet(JSON.parse(_F.readFileSync(netPath,'utf8')));
+    const pEmpty = netValue(G, 1);
+    addProp(G.players[1], {id:78001,t:'prop',color:'gold',name:'g1',v:4}, 'gold');
+    addProp(G.players[1], {id:78002,t:'prop',color:'gold',name:'g2',v:4}, 'gold');
+    addProp(G.players[1], {id:78003,t:'prop',color:'green',name:'r1',v:2}, 'green');
+    addProp(G.players[1], {id:78004,t:'prop',color:'green',name:'r2',v:2}, 'green');
+    const pTwoSets = netValue(G, 1);
+    T('trained net: probabilities in (0,1)', pEmpty>0 && pEmpty<1 && pTwoSets>0 && pTwoSets<1);
+    T('trained net: two complete sets beat an empty board', pTwoSets > pEmpty + 0.1);
+    loadValueNet(null); // suites below must run the certified champion unmodified
+  }
+}
+
 // ===== determinized Monte Carlo (ISMCTS-lite) =====
 newGame();
 // play a few AI half-turns so zones are populated, then sample worlds from seat 1's view
