@@ -1,5 +1,21 @@
 # infinite-ai — Changelog
 
+## v0.4.0 — 2026-07-12
+Three candidates enter the Arena: search reinvestment, JSN search, gen-2 training.
+
+**Search-based Just Say No (engine/index.html)**
+- resolveBlock now threads the CONCRETE pending effect (fx: {pay}/{stealId}/{takeColor}/{swapTheirs,swapMine}) through all 12 call sites into aiShouldJSN — the brain finally knows WHAT it's blocking, not just the attack's name.
+- New jsnSearch: across determinized worlds, compare P(win) if the effect resolves vs if a No Deal is burned (counter-chains played with actual dealt hands via mcBlocked; the spent card's option value is priced automatically because the block branch no longer holds it). Chain parity handled for counter-JSN decisions. Gated behind MC.jsn (new MC flag) + MC_ON; heuristic fallback unchanged when the effect is unknown (frozen brains) or MC is off. Old brains ignore the extra arg — full ladder/arena backward compatibility.
+- Assertions: jsnFx effect application in-sim, seeded determinism, blocks a game-losing takeover (gain 1.00), both decision paths wired.
+
+**Arena experiment presets (engine/arena.html)**
+- Per-side arming: {net, config patch} evaluated inside each brain's own scope. Pre-committed matchups: JSN candidate vs champion, 2x-search candidate (det 16, topK 6, margin 1.2) vs champion, full-stack vs champion, the historic net-v1 fight, and self-match sanity. Incumbent is pinned to the exact certified config (net, MC.jsn=0). Per-matchup localStorage runs. Parity adds patch-divergence and JSN-self-match-symmetry checks (15 total).
+
+**Gen-2 guided generation (engine/learn.html)**
+- Gear selector: gen-1 greedy (fastest data) or gen-2 guided — champion self-play with MC on and the champion net loaded, ~arena speed, subtler positions. Gen-2 training warm-starts from the champion net; separate checkpoint key per mode. Parity adds guided-batch soundness checks (14 total).
+
+**Tests** — engine 49/49, arena parity 15/15, learn parity 14/14, trainer parity 27/27, all sanities green.
+
 ## v0.3.1 — 2026-07-12
 **NEW CHAMPION: the net brain.** First Arena verdict — main + nets/value-gym-v1.json is STRONGER than main (crossed at 2,412 games, 52.78% ± 2.73pp, anytime-valid alpha=0.05, fresh seeds 50000+). Verdict record: ladder-results/20260712-arena-net-v1-STRONGER.md. The AlphaZero flywheel's first lap paid off; README champion line updated.
 

@@ -230,6 +230,49 @@ NET.mode='off'; NET.tx=null; MYSEAT=0;
 T('elo: equal ratings -> +16', eloDelta(1000,1000)===16);
 T('elo: favourite beating underdog gains little', eloDelta(1400,1000)<8 && eloDelta(1000,1400)>24);
 
+// ===== search-based Just Say No (v0.4.0) =====
+(function(){
+  const deckAll = buildDeck();
+  const take = pred => { const i=deckAll.findIndex(pred); if(i<0) throw new Error('jsn test: card not found'); return deckAll.splice(i,1)[0]; };
+  const cols = Object.keys(COLORS);
+  const colD = cols.find(c=>COLORS[c].size===2) || cols[0];
+  const colsA = cols.filter(c=>c!==colD && COLORS[c].size<=3).slice(0,2);
+  function scenario(){ // D(0): one complete small set + a No Deal. A(1): two complete sets — takeover = A wins.
+    newGame();
+    G.players.forEach(p=>{ p.hand.length = 0; p.bank.length = 0; Object.keys(p.props).forEach(k=>delete p.props[k]); });
+    const D = G.players[0], A = G.players[1];
+    for(let i=0;i<COLORS[colD].size;i++) (D.props[colD]=D.props[colD]||[]).push(take(c=>c.t==='prop'&&c.color===colD));
+    D.hand.push(take(c=>c.t==='action'&&c.kind==='nodeal'));
+    colsA.forEach(col=>{ for(let i=0;i<COLORS[col].size;i++) (A.props[col]=A.props[col]||[]).push(take(c=>c.t==='prop'&&c.color===col)); });
+    D.bank.push(take(c=>c.t==='money'&&c.v===5));
+    G.turn = 1; G.playsLeft = 2; G.over = false;
+    return {D, A};
+  }
+  const seeded = seed => { let x=seed>>>0; return ()=>{ x^=x<<13; x^=x>>>17; x^=x<<5; return ((x>>>0)%1e9)/1e9; }; };
+  const realRnd = Math.random;
+
+  scenario();
+  Math.random = seeded(11);
+  const st1 = determinize(0);
+  jsnFx(st1, 0, 1, {takeColor:colD});
+  T('jsnFx: takeover moves the whole set in-sim', !st1.players[0].props[colD] && st1.players[1].props[colD].length===COLORS[colD].size);
+  const st2 = determinize(0);
+  const before = bankTotal(st2.players[0]);
+  jsnFx(st2, 0, 1, {pay:5});
+  T('jsnFx: payment moves real value in-sim', bankTotal(st2.players[0])===before-5 && bankTotal(st2.players[1])>=5);
+
+  const g1 = (Math.random = seeded(42), jsnSearch(0, 1, 'Hostile Takeover', 0, {takeColor:colD}));
+  const g2 = (Math.random = seeded(42), jsnSearch(0, 1, 'Hostile Takeover', 0, {takeColor:colD}));
+  T('jsnSearch: seeded determinism', g1===g2 && isFinite(g1));
+  T('jsnSearch: blocks the takeover that would hand the game away (gain '+g1.toFixed(2)+')', g1 > 0.15);
+  Math.random = seeded(7);
+  T('aiShouldJSN: search path wires through and says block', aiShouldJSN(G.players[0], 0, 1, 'Hostile Takeover', 0, {takeColor:colD})===true);
+  const heldMC = MC_ON; MC_ON = false;
+  Math.random = seeded(7);
+  T('aiShouldJSN: heuristic path intact when MC is off (takeover rule)', aiShouldJSN(G.players[0], 0, 1, 'Hostile Takeover', 0, {takeColor:colD})===true);
+  MC_ON = heldMC; Math.random = realRnd;
+})();
+
 // ===== FULL-GAME soak (must run last: ends via interval watching G.over) =====
 newGame();
 G.players.forEach(p=>p.isAI=true);

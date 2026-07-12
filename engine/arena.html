@@ -107,11 +107,7 @@
     <div class="panel" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:1">
       <button id="go" class="primary">start</button>
       <button id="reset">reset run</button>
-      <select id="netSel">
-        <option value="repo">net: nets/value-gym-v1.json (from repo)</option>
-        <option value="paste">net: paste weights JSON</option>
-        <option value="none">no net — self-match sanity (must pin 50.0%)</option>
-      </select>
+      <select id="netSel"></select>
       <span class="legend" id="netInfo"></span>
     </div>
   </div>
@@ -159,8 +155,8 @@ log = function(){}; // engine log() is O(n^2) over long runs — presentation on
 
 var ARENA_SECT = null, ARENA_BRAINS = null;
 
-function arenaBrain(sect, net){
-  const brain = eval('(function(){\n'+sect+'\n;return {'+
+function arenaBrain(sect, net, patch){
+  const brain = eval('(function(){\n'+sect+'\n;'+(patch||'')+'\n;return {'+
     'AI_W: typeof AI_W!=="undefined" ? AI_W : null,'+
     'aiStep: typeof aiStep==="function" ? aiStep : null,'+
     'aiShouldJSN: typeof aiShouldJSN==="function" ? aiShouldJSN : null,'+
@@ -175,7 +171,7 @@ function arenaBrain(sect, net){
 /* per-seat dispatch of the engine's three global call points */
 var SEAT = [null,null,null];
 aiStep      = function(p){ return SEAT[G.turn].aiStep(p); };
-aiShouldJSN = function(p,defIdx,atkIdx,desc,count){ return SEAT[defIdx].aiShouldJSN(p,defIdx,atkIdx,desc,count); };
+aiShouldJSN = function(p,defIdx,atkIdx,desc,count,fx){ return SEAT[defIdx].aiShouldJSN(p,defIdx,atkIdx,desc,count,fx); };
 keepScore   = function(c,p){ return SEAT[G.players.indexOf(p)].keepScore(c,p); };
 
 function mulberry32(seed){
@@ -231,8 +227,9 @@ self.onmessage = function(e){
   try{
     if(d.type==='setup'){
       ARENA_SECT = d.aiSection;
-      ARENA_BRAINS = { work: arenaBrain(ARENA_SECT, d.net||null), base: arenaBrain(ARENA_SECT, null) };
-      self.postMessage({type:'armed', net: !!d.net});
+      ARENA_BRAINS = { work: arenaBrain(ARENA_SECT, d.workNet||null, d.workPatch),
+                       base: arenaBrain(ARENA_SECT, d.baseNet||null, d.basePatch) };
+      self.postMessage({type:'armed', net: !!d.workNet});
     } else if(d.type==='play'){
       const t0 = Date.now();
       const r = runSeed(d.seed);
@@ -287,9 +284,25 @@ function verdictOf(t){
   return null;
 }
 
-/* ---------- persistence ---------- */
-let MODE = 'repo';
-const storeKey = ()=>'coastline-arena-v1:'+MODE;
+/* ---------- experiments: pre-committed matchups ----------
+   Each preset defines both corners completely (net + config patch applied inside
+   that brain's own scope). The incumbent champion is ALWAYS "net, MC.jsn=0" — the
+   exact configuration certified on 2026-07-12; candidates change one thing at a
+   time (except full-stack, which is the shipping decision). */
+const PRESETS = {
+  'jsn':       { label:'CANDIDATE: net + JSN search  vs  champion (net)',
+                 work:{net:1, patch:'MC.jsn=1;'},                                base:{net:1, patch:'MC.jsn=0;'} },
+  'bigsearch': { label:'CANDIDATE: net + 2x search budget  vs  champion (net)',
+                 work:{net:1, patch:'MC.jsn=0; MC.det=16; MC.topK=6; MC.margin=1.2;'}, base:{net:1, patch:'MC.jsn=0;'} },
+  'fullstack': { label:'CANDIDATE: net + JSN + 2x search  vs  champion (net)',
+                 work:{net:1, patch:'MC.jsn=1; MC.det=16; MC.topK=6; MC.margin=1.2;'}, base:{net:1, patch:'MC.jsn=0;'} },
+  'net-v1':    { label:'HISTORIC: net  vs  pre-net champion (already certified)',
+                 work:{net:1, patch:'MC.jsn=0;'},                                base:{net:0, patch:'MC.jsn=0;'} },
+  'sanity':    { label:'SANITY: self-match — must pin 50.0%',
+                 work:{net:0, patch:'MC.jsn=0;'},                                base:{net:0, patch:'MC.jsn=0;'} },
+};
+let MODE = 'jsn';
+const storeKey = ()=>'coastline-arena-v2:'+MODE;
 function save(){
   try{
     localStorage.setItem(storeKey(), JSON.stringify({
@@ -342,7 +355,13 @@ function spawnPool(){
     w.onmessage = e => {
       const d = e.data;
       if(d.type==='fatal'){ err('worker fatal: '+d.msg); w.busySeed=null; return; }
-      if(d.type==='ready'){ w.postMessage({type:'setup', aiSection, net:netW}); return; } // core posts ready from inside the boot eval
+      if(d.type==='ready'){
+        const pr = PRESETS[MODE];
+        w.postMessage({type:'setup', aiSection,
+          workNet: pr.work.net?netW:null, baseNet: pr.base.net?netW:null,
+          workPatch: pr.work.patch, basePatch: pr.base.patch});
+        return; // core posts ready from inside the boot eval
+      }
       if(d.type==='armed'){ w.armed = true; if(running) dispatch(w); return; }
       if(d.type==='seed'){ onSeed(w, d); return; }
     };
@@ -363,14 +382,12 @@ async function loadSources(){
   aiSection = engineSrc.slice(a,b).replace(/<\/script>\s*<script>/g, ';');
 }
 async function loadNet(){
-  if(MODE==='none'){ netW = null; $id('netInfo').textContent = 'self-match: both sides identical'; return; }
-  if(MODE==='paste'){
-    netW = JSON.parse($id('pasteBox').value);
-  } else {
-    netW = await (await fetch('../nets/value-gym-v1.json')).json();
-  }
+  const pr = PRESETS[MODE];
+  if(!pr.work.net && !pr.base.net){ netW = null; $id('netInfo').textContent = 'no net in this matchup'; return; }
+  const pasted = $id('pasteBox').value.trim();
+  netW = pasted ? JSON.parse(pasted) : await (await fetch('../nets/value-gym-v1.json')).json();
   if(!netW.W1 || !netW.FEAT_N) throw new Error('weights JSON missing W1/FEAT_N');
-  $id('netInfo').textContent = 'net: '+netW.FEAT_N+' features, '+(netW.W1.length+netW.W2.length+netW.W3.length)+' weights';
+  $id('netInfo').textContent = 'net: '+netW.FEAT_N+' features'+(pasted?' (pasted)':' (repo)');
 }
 
 /* ---------- render ---------- */
@@ -456,15 +473,21 @@ $id('reset').onclick = ()=>{
   if(!confirm('Discard this run’s '+totals().games+' games?')) return;
   ST.results.clear(); ST.hist = []; ST.verdict = null; save(); render();
 };
+Object.keys(PRESETS).forEach(k=>{
+  const o = document.createElement('option'); o.value = k; o.textContent = PRESETS[k].label;
+  $id('netSel').appendChild(o);
+});
+$id('netSel').value = MODE;
 $id('netSel').onchange = ()=>{
   MODE = $id('netSel').value;
-  $id('pastePanel').style.display = MODE==='paste' ? 'block' : 'none';
-  $id('pasteBox').style.display = 'block';
   if(running){ running = false; $id('go').textContent = 'start'; }
-  // different mode = different experiment = its own stored run
+  // different matchup = different experiment = its own stored run and its own workers
   pool.forEach(w=>w.terminate()); pool = [];
   load(); render();
 };
+$id('pastePanel').style.display = 'block';
+$id('pasteBox').style.display = 'block';
+$id('pasteBox').placeholder = 'optional: paste weights JSON to override the repo net for net-armed sides';
 setInterval(()=>{ if(running){ render(); save(); } }, 1500);
 load(); render();
 </script>

@@ -65,6 +65,25 @@ if(ready){
   }
 }
 
+/* ---------- part 1b: guided mode (gen-2) — MCTS + net self-play still yields sound batches ---------- */
+if(ready){
+  const netW = JSON.parse(fs.readFileSync(path.join(ROOT,'nets','value-gym-v1.json'),'utf8'));
+  outbox.length = 0;
+  self.onmessage({ data: { type:'start', seedBase: 91, sample: 0.5, guided: true, net: netW } });
+  self.onmessage({ data: { type:'pause' } });
+  const gb = outbox.find(m=>m.type==='batch');
+  check('guided start yields a batch (champion self-play runs)', !!gb && gb.games > 0);
+  if(gb){
+    const a = new Float32Array(gb.buf), REC = F+1;
+    let ok = a.length>0 && a.length % REC === 0;
+    for(let r=0; r<a.length/REC && ok; r++){
+      const y = a[r*REC+F]; if(y!==0 && y!==1) ok = false;
+      for(let i=0;i<F;i++){ const v=a[r*REC+i]; if(!Number.isFinite(v)||v<0||v>2) ok = false; }
+    }
+    check('guided batch is whole, bounded, binary-labelled', ok);
+  }
+}
+
 /* ---------- part 2: train worker on synthetic data + engine round-trip ---------- */
 const trainOut = [];
 const trainScope = (function(){

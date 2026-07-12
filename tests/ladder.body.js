@@ -81,7 +81,7 @@
   /* ---------- per-seat brain dispatch (the 3 global call points) ---------- */
   let SEAT = [null,null,null];
   aiStep      = (p)=>SEAT[G.turn].aiStep(p);
-  aiShouldJSN = (p,defIdx,atkIdx,desc,count)=>SEAT[defIdx].aiShouldJSN(p,defIdx,atkIdx,desc,count);
+  aiShouldJSN = (p,defIdx,atkIdx,desc,count,fx)=>SEAT[defIdx].aiShouldJSN(p,defIdx,atkIdx,desc,count,fx);
   keepScore   = (c,p)=>SEAT[G.players.indexOf(p)].keepScore(c,p);
 
   /* ---------- seeded RNG + game runner ---------- */

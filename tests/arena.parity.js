@@ -45,7 +45,7 @@ const last = (t)=>{ for(let i=outbox.length-1;i>=0;i--) if(outbox[i].type===t) r
 /* ---------- part 1: self-match symmetry (the ladder's ±0.0pp law) ---------- */
 bootWorker();
 check('worker boots and core posts ready from inside the eval', !!last('ready') && !last('fatal') || (console.log('   fatal: '+(last('fatal')||{}).msg), false));
-msg({type:'setup', aiSection, net:null});
+msg({type:'setup', aiSection, workNet:null, baseNet:null, workPatch:'MC.jsn=0;', basePatch:'MC.jsn=0;'});
 check('brains arm without a net', !!last('armed') && last('armed').net===false);
 msg({type:'play', seed:70001});
 const s1 = last('seed');
@@ -62,7 +62,7 @@ check('same seed replays bit-identically', !!s1b && JSON.stringify({W:s1b.W,d:s1
 /* ---------- part 2: net actually arms and reaches play ---------- */
 const netFile = path.join(ROOT,'nets','value-gym-v1.json');
 const net = JSON.parse(fs.readFileSync(netFile,'utf8'));
-msg({type:'setup', aiSection, net});
+msg({type:'setup', aiSection, workNet:net, baseNet:null, workPatch:'MC.jsn=0;', basePatch:'MC.jsn=0;'});
 check('brains re-arm with the real net', !!last('armed') && last('armed').net===true);
 let diverged = false, blocks = 0;
 for(let seed=70001; seed<70009 && !diverged; seed++){
@@ -100,6 +100,23 @@ for(let i=0;i<20000;i++){
   if(S >= boundary(V)){ crossAt = (i+1)*6; break; }
 }
 check('a true +5pp edge certifies (crossed at '+crossAt+' games)', crossAt>0 && crossAt<20000);
+
+/* ---------- part 4: config patches land inside the brain's own scope ---------- */
+msg({type:'setup', aiSection, workNet:null, baseNet:null, workPatch:'MC_ON=false;', basePatch:''});
+check('patched setup arms', !!last('armed'));
+let patchDiverged = false;
+for(let seed=70001; seed<70007 && !patchDiverged; seed++){
+  outbox.length = 0;
+  msg({type:'play', seed});
+  const r = last('seed');
+  if(r && r.W !== r.decided/2) patchDiverged = true; // greedy-vs-MCTS must not mirror
+}
+check('a config patch changes play (MC_ON=false side diverges)', patchDiverged);
+msg({type:'setup', aiSection, workNet:null, baseNet:null, workPatch:'MC.jsn=1;', basePatch:'MC.jsn=1;'});
+outbox.length = 0;
+msg({type:'play', seed:70001});
+const sj = last('seed');
+check('JSN-search self-match stays symmetric (search on both sides)', !!sj && sj.W === sj.decided/2);
 
 console.log(fails===0 ? 'ALL ARENA PARITY TESTS PASS' : 'FAILURES: '+fails);
 process.exit(fails===0?0:1);

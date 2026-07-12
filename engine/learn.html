@@ -54,6 +54,10 @@
 
 <div class="card">
   <div class="row">
+    <select id="genmode" style="background:#0e141d;color:inherit;border:1px solid #223046;border-radius:8px;font:inherit;padding:8px">
+      <option value="greedy">gen-1: greedy self-play (fastest data)</option>
+      <option value="guided">gen-2: champion self-play (net + full search — richer, slower)</option>
+    </select>
     <button id="startbtn" disabled>Start</button>
     <button id="pausebtn" class="sec" disabled>Pause</button>
     <button id="exportbtn" class="sec" disabled>Export weights</button>
@@ -121,8 +125,10 @@ self.onmessage = function(e){
 
 <script type="text/plain" id="gen-core">
 /* Self-play generation core — the browser twin of tests/selfplay.js --gen.
-   Plays greedy self-play (MC off), samples positions at the aiStep chokepoint,
-   labels them at game end, and streams Float32Array batches (transferable). */
+   Two gears: GREEDY (MC off — hundreds of games/sec, gen-1 data) and GUIDED
+   (MC on + the current champion net loaded — ~arena speed, gen-2 data whose
+   positions carry the champion's subtleties). Samples at the aiStep chokepoint,
+   labels at game end, streams Float32Array batches (transferable). */
 log = function(){};
 MC_ON = false;
 function mb(seed){ let s=(seed>>>0)+0x9E3779B9; return function(){ s|=0; s=(s+0x6D2B79F5)|0;
@@ -171,7 +177,11 @@ const setTimeoutReal = (function(){ const mc = new MessageChannel(); const q = [
   return (fn)=>{ q.push(fn); mc.port2.postMessage(0); }; })();
 self.onmessage = function(e){
   const m = e.data;
-  if(m.type==='start'){ SEED = m.seedBase||0; SAMPLER.p = m.sample||0.25; if(!RUNNING){ RUNNING = true; loop(); } }
+  if(m.type==='start'){
+    SEED = m.seedBase||0; SAMPLER.p = m.sample||0.25;
+    if(m.guided && m.net){ MC_ON = true; loadValueNet(m.net); } else { MC_ON = false; loadValueNet(null); }
+    if(!RUNNING){ RUNNING = true; loop(); }
+  }
   else if(m.type==='pause'){ RUNNING = false; }
 };
 self.postMessage({type:'ready', FEAT_N: FEAT_N});
@@ -291,7 +301,11 @@ self.postMessage({type:'trainerReady'});
 
 <script>
 (async function(){
-  const KEY = 'infinite_ai_gym_net_v1';
+  const MODE = ()=> $id('genmode') && $id('genmode').value==='guided' ? 'guided' : 'greedy';
+  const KEY_OF = m => m==='guided' ? 'infinite_ai_gym_net_g2' : 'infinite_ai_gym_net_v1';
+  let KEY = KEY_OF('greedy');
+  let champNet = null;
+  async function champ(){ if(!champNet) champNet = await (await fetch('../nets/value-gym-v1.json')).json(); return champNet; }
   const $id = s=>document.getElementById(s);
   let running = false, wakeLock = null;
   let games = 0, rows = 0, lastGames = 0, lastT = Date.now(), speed = '0';
@@ -429,20 +443,40 @@ self.postMessage({type:'trainerReady'});
   document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && running) setWake(true); });
 
   /* ---- controls ---- */
-  $id('startbtn').onclick = ()=>{
+  $id('startbtn').onclick = async ()=>{
+    const guided = MODE()==='guided';
+    let net = null;
+    if(guided){
+      try{ net = await champ(); }catch(e){ logLine('cannot load champion net: '+e.message); return; }
+    }
     running = true;
-    gens.forEach((w,i)=>w.postMessage({type:'start', seedBase: Date.now()%100000 + i*10000000, sample:0.25}));
+    gens.forEach((w,i)=>w.postMessage({type:'start', seedBase: Date.now()%100000 + i*10000000, sample:0.25, guided, net}));
     trainer.postMessage({type:'trainStart'});
     $id('startbtn').disabled = true; $id('pausebtn').disabled = false; $id('exportbtn').disabled = false;
-    $id('runbadge').textContent = 'learning…'; setWake(true);
-    logLine('gym open: '+N+' players sparring, coach training on the stream');
+    $id('runbadge').textContent = guided ? 'learning (gen-2: champion self-play)…' : 'learning…'; setWake(true);
+    $id('genmode').disabled = true;
+    logLine(guided ? 'gym open, GUIDED: '+N+' champions sparring with full search — slower games, richer positions'
+                   : 'gym open: '+N+' players sparring, coach training on the stream');
   };
   $id('pausebtn').onclick = ()=>{
     running = false;
     gens.forEach(w=>w.postMessage({type:'pause'}));
     trainer.postMessage({type:'trainStop'});
     $id('startbtn').disabled = false; $id('pausebtn').disabled = true;
+    $id('genmode').disabled = false;
     $id('runbadge').textContent = 'paused'; setWake(false);
+  };
+  $id('genmode').onchange = async ()=>{
+    KEY = KEY_OF(MODE());
+    let warm = null; try{ warm = JSON.parse(localStorage.getItem(KEY)||'null'); }catch(err){}
+    if(!warm && MODE()==='guided'){
+      // gen-2 default: warm-start from the champion's own net and refine on its games
+      try{ warm = await champ(); logLine('gen-2: warm-starting from the champion net'); }catch(e){}
+    }
+    trainer.postMessage({type:'reset'});
+    if(warm) trainer.postMessage({type:'init', FEAT_N: FEAT, warm});
+    lossHist.length = 0; drawLoss();
+    logLine('mode: '+MODE()+(warm?' (net restored)':' (fresh net)'));
   };
   $id('exportbtn').onclick = ()=>{ pendingExport = true; trainer.postMessage({type:'export'}); };
   $id('resetbtn').onclick = ()=>{

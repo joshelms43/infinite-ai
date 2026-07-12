@@ -2180,12 +2180,12 @@ function spendAction(c, actor){
   closeSheet(); renderAll();
 }
 /* No Deal chain. cb(blocked:boolean) */
-function resolveBlock(defIdx, atkIdx, desc, cb){
+function resolveBlock(defIdx, atkIdx, desc, cb, fx){ // fx = the concrete pending effect, for search-based JSN decisions
   function chain(aIdx,bIdx,count){
     const p = G.players[aIdx];
     if(!hasNoDeal(p)) return cb(count%2===1);
     if(p.isAI){
-      if(aiShouldJSN(p, aIdx, bIdx, desc, count)){
+      if(aiShouldJSN(p, aIdx, bIdx, desc, count, fx)){
         const nd = takeNoDeal(p); log(p.name+' played No Deal!');
         if(aIdx>0) aiShowcase(nd, aIdx);
         renderAll();
@@ -2316,7 +2316,7 @@ function doFavour(c,targetIdx,by){
   resolveBlock(targetIdx,b,'Call In a Favour',blocked=>{
     if(blocked){ log(nameOf(targetIdx)+' blocked it.'); checkAllWin(); renderAll(); return; }
     requestPayment(targetIdx,5,b,()=>{ checkAllWin(); renderAll(); flashOpp(targetIdx); sfx('coin'); });
-  });
+  }, {pay:5});
 }
 function doShout(c,by){
   if(NET.intercept('shout',{id:c.id})) return;
@@ -2327,7 +2327,7 @@ function doShout(c,by){
     resolveBlock(t,b,'Shout a Round',blocked=>{
       if(blocked){ log(G.players[t].name+' blocked it.'); return next(); }
       requestPayment(t,2,b,next);
-    });
+    }, {pay:2});
   },()=>{ checkAllWin(); renderAll(); });
 }
 function doRent(c,color,targetIdx,by){
@@ -2358,7 +2358,7 @@ function execRent(c,color,targetIdx,hikeCard,base,by){
     resolveBlock(t,b,'Rent',blocked=>{
       if(blocked){ log(nameOf(t)+' blocked the rent.'); return next(); }
       requestPayment(t,amount,b,()=>{ flashOpp(t); sfx('coin'); next(); });
-    });
+    }, {pay:amount});
   },()=>{ checkAllWin(); renderAll(); });
 }
 function stealTargetsOf(pIdx){ // props not in complete sets
@@ -2379,7 +2379,7 @@ function execSwipe(c, tIdx, cardId, by){
     log(nameOf(b)+' swiped '+cardName(entry.card)+'.');
     flashOpp(tIdx); sfx('good'); haptic(12);
     checkAllWin(); renderAll();
-  });
+  }, {stealId:entry.card.id});
 }
 function execTakeoverD(c, tIdx, color, by){
   if(NET.intercept('takeover',{id:c.id,t:tIdx,color})) return;
@@ -2390,7 +2390,7 @@ function execTakeoverD(c, tIdx, color, by){
     if(blocked){ log('Takeover blocked.'); checkAllWin(); renderAll(); return; }
     doTakeover(tIdx,b,color);
     checkAllWin(); renderAll(); flashOpp(tIdx); sfx('good'); haptic([12,50,18]);
-  });
+  }, {takeColor:color});
 }
 function execSwapFinal(c, tIdx, theirCardId, mineCardId, by){
   if(NET.intercept('swap',{id:c.id,t:tIdx,cid:theirCardId,mid:mineCardId})) return;
@@ -2409,7 +2409,7 @@ function execSwapFinal(c, tIdx, theirCardId, mineCardId, by){
     log(nameOf(b)+' swapped '+cardName(mineEntry.card)+' for '+cardName(theirEntry.card)+'.');
     flashOpp(tIdx); sfx('good'); haptic(12);
     checkAllWin(); renderAll();
-  });
+  }, {swapTheirs:theirEntry.card.id, swapMine:mineEntry.card.id});
 }
 function doTakeover(fromIdx,toIdx,color){
   const from=G.players[fromIdx], to=G.players[toIdx];
@@ -2986,8 +2986,9 @@ function jsnAdjusted(ev, defIdx, selfIdx){
   const pj = pHoldsAtLeastOne('a:nodeal', defIdx, selfIdx);
   return ev*(1-pj) + wOf(G.players[selfIdx]).jsn_burn*pj; // forcing out their No Deal has value too
 }
-function aiShouldJSN(p, defIdx, atkIdx, desc, count){
+function aiShouldJSN(p, defIdx, atkIdx, desc, count, fx){
   if(!p.hand.some(x=>x.t==='action'&&x.kind==='nodeal')) return false;
+  if(MC_ON && MC.jsn && fx) return jsnSearch(defIdx, atkIdx, desc, count, fx) > 0;
   const loss = desc==='Hostile Takeover' ? 14 : desc==='Sneaky Swipe' ? 6 :
                desc==='Swap Meet' ? 4 : desc==='Rent' ? 6 :
                desc==='Call In a Favour' ? 5 : desc==='Shout a Round' ? 2 : 4;
@@ -3062,7 +3063,7 @@ function brainCandidates(p, idx, next){
           if(!blocked){ doTakeover(best.t,idx,best.col); if(checkAllWin())return; }
           else log('Takeover blocked.');
           next();
-        });
+        }, {takeColor:best.col});
       }, {cardId:tk.id, mode:'play', label:'Hostile Takeover → '+(best.t===0?'you':G.players[best.t].name)});
     }
   }
@@ -3092,7 +3093,7 @@ function brainCandidates(p, idx, next){
       resolveBlock(t,idx,'Rent',blocked=>{
         if(blocked){ log((t===0?'You':G.players[t].name)+' blocked the rent.'); return go(); }
         requestPayment(t,amount,idx,go);
-      });
+      }, {pay:amount});
     },()=>{ if(!checkAllWin()) next(); });
   }
 
@@ -3114,7 +3115,7 @@ function brainCandidates(p, idx, next){
         if(!blocked){ transferProp(G.players[best.t],p,best.x.card); log(p.name+' swiped '+cardName(best.x.card)+'.'); if(checkAllWin())return; }
         else log('Swipe blocked.');
         next();
-      });
+      }, {stealId:best.x.card.id});
     }, {cardId:sw.id, mode:'play', label:'Swipe '+cardName(best.x.card)});
   }
 
@@ -3149,7 +3150,7 @@ function brainCandidates(p, idx, next){
           if(checkAllWin())return;
         } else log('Swap blocked.');
         next();
-      });
+      }, {swapTheirs:best.x.card.id, swapMine:best.mx.card.id});
     }, {cardId:sm.id, mode:'play', label:'Swap for '+cardName(best.x.card)});
   }
 
@@ -3163,7 +3164,7 @@ function brainCandidates(p, idx, next){
       resolveBlock(t,idx,'Call In a Favour',blocked=>{
         if(blocked){ log('Favour blocked.'); return next(); }
         requestPayment(t,5,idx,()=>{ if(!checkAllWin()) next(); });
-      });
+      }, {pay:5});
     }, {cardId:fv.id, mode:'play', label:'Call In a Favour → '+(t===0?'you':G.players[t].name)});
   }
 
@@ -3178,7 +3179,7 @@ function brainCandidates(p, idx, next){
         resolveBlock(t,idx,'Shout a Round',blocked=>{
           if(blocked){ log('Blocked.'); return go(); }
           requestPayment(t,2,idx,go);
-        });
+        }, {pay:2});
       },()=>{ if(!checkAllWin()) next(); });
     }, {cardId:sh.id, mode:'play', label:'Shout a Round'});
   }
@@ -3219,7 +3220,7 @@ function brainCandidates(p, idx, next){
    decisions skip all of this and stay greedy (and instant). Uses Math.random
    throughout, so seeded harness runs stay deterministic. Execution still goes
    through the interactive candidate closures — selection changes, rules never. */
-const MC = { det: 8, topK: 4, margin: 2.0, horizon: 16, netHorizon: 6 }; // netHorizon applies only when a value net is loaded
+const MC = { det: 8, topK: 4, margin: 2.0, horizon: 16, netHorizon: 6, jsn: 1 }; // netHorizon applies only when a value net is loaded; jsn = search-based No Deal decisions
 let MC_ON = true; // headless genome training rebinds this off — Monte Carlo costs ~500x per game and the genome is consumed by both layers either way
 
 function mcClone(o){ return JSON.parse(JSON.stringify(o)); }
@@ -3281,6 +3282,47 @@ function mcBlocked(st, defIdx, atkIdx, loss, isTakeover){ // No Deal chain with 
     p.hand.splice(i,1); st.discard.push({t:'action',kind:'nodeal',v:4,id:++MC_ID});
     count++; const tmp=a; a=b; b=tmp;
   }
+}
+/* ---- search-based Just Say No ----
+   The old heuristic guessed a loss table; the search ASKS: across determinized
+   worlds, is P(I win) higher if this effect resolves, or if I burn a No Deal
+   (and survive the counter-chain, played with the actual dealt hands)? The cost
+   of spending the card is priced automatically — the block branch simply no
+   longer holds it. fx is the concrete pending effect from resolveBlock. */
+function jsnFx(st, defIdx, atkIdx, fx){ // apply the pending effect to a sim world
+  if(fx.pay){ mcPay(st, defIdx, atkIdx, fx.pay); return; }
+  const D = st.players[defIdx], A = st.players[atkIdx];
+  const pull = (q,id)=>{ for(const col of Object.keys(q.props)){ const i=q.props[col].findIndex(c=>c.id===id); if(i>-1){ const c=q.props[col].splice(i,1)[0]; if(!q.props[col].length) delete q.props[col]; return {c, col}; } } return null; };
+  const put = (q,c,col)=>{ (q.props[col]=q.props[col]||[]).push(c); };
+  if(fx.stealId){ const e=pull(D,fx.stealId); if(e) put(A,e.c,e.col); return; }
+  if(fx.takeColor){
+    const arr = D.props[fx.takeColor];
+    if(arr){ delete D.props[fx.takeColor]; (A.props[fx.takeColor]=A.props[fx.takeColor]||[]).push(...arr);
+      if(D.bldg && D.bldg[fx.takeColor]){ A.bldg=A.bldg||{}; A.bldg[fx.takeColor]=D.bldg[fx.takeColor]; delete D.bldg[fx.takeColor]; } }
+    return;
+  }
+  if(fx.swapTheirs){ const t=pull(D,fx.swapTheirs), m=pull(A,fx.swapMine); if(t) put(A,t.c,t.col); if(m) put(D,m.c,m.col); return; }
+}
+function jsnSearch(decIdx, othIdx, desc, count, fx){ // >0 means blocking wins more worlds
+  const origDef = count%2===0 ? decIdx : othIdx, origAtk = count%2===0 ? othIdx : decIdx;
+  const isTk = desc==='Hostile Takeover';
+  const loss = isTk ? 14 : desc==='Sneaky Swipe' ? 6 : desc==='Rent' ? 6 : desc==='Call In a Favour' ? 5 : desc==='Swap Meet' ? 4 : 2;
+  const n = Math.max(4, MC.det);
+  let vPlay = 0, vPass = 0;
+  for(let d=0; d<n; d++){
+    const stP = determinize(decIdx); // decline: outcome settles at current parity
+    if(count%2===0) jsnFx(stP, origDef, origAtk, fx);
+    vPass += rolloutValue(stP, decIdx);
+    const stJ = determinize(decIdx); // play: burn ours, then the counter-chain runs with dealt hands
+    const H = stJ.players[decIdx].hand;
+    const i = H.findIndex(c=>c.t==='action'&&c.kind==='nodeal');
+    if(i>-1) stJ.discard.push(H.splice(i,1)[0]);
+    const oddAfter = mcBlocked(stJ, othIdx, decIdx, loss, isTk);
+    const blocked = ((count+1) + (oddAfter?1:0)) % 2 === 1;
+    if(!blocked) jsnFx(stJ, origDef, origAtk, fx);
+    vPlay += rolloutValue(stJ, decIdx);
+  }
+  return (vPlay - vPass)/n;
 }
 function mcTake(q, id){ const i=q.hand.findIndex(c=>c.id===id); return i>-1 ? q.hand.splice(i,1)[0] : null; }
 // mcMoves: greedy-policy move list over a (possibly determinized) state. evs mirror
