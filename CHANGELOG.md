@@ -1,5 +1,18 @@
 # infinite-ai — Changelog
 
+## v0.3.0 — 2026-07-12
+The Arena — browser title fights that run until they KNOW.
+
+**engine/arena.html**
+- Replaces the CI ladder for interactive verdicts: a worker pool plays work (engine + optional value net) vs base (the engine as shipped) using the ladder's exact paired-seed protocol — per seed, each side solo in all 3 seats vs 2x the other, same shuffled deck, MCTS on for both.
+- The statistics are the feature: "run until significant" with an ordinary CI is a false-champion machine (every peek re-rolls the dice), so the page uses an anytime-valid confidence sequence (Robbins normal-mixture boundary, alpha=0.05, rho=100 — pre-committed in the file) that is valid at every moment simultaneously. The band only narrows; the banner flipping IS the decision. Verdicts: STRONGER / WEAKER when the band leaves 50%, PRACTICAL NULL when it narrows inside ±0.5pp.
+- Live chart of the win share inside its narrowing band, solo win rates per side, current edge vs required boundary, localStorage persistence per mode (pause / close tab / resume overnight), self-match sanity mode that must pin 50.0%.
+
+**Provenance of the design**
+- The empty-net CI run (ladder-results/20260712T015418Z) came back 50.0% ± 0.0pp over 3,000 games — the net_file input was blank, so it was accidentally a perfect 3,000-game self-match: strong live evidence the pairing has zero bias, and the motivation to move title fights into the browser.
+
+**Tests** — new `npm run test:arena` (12 checks): worker boot, self-match perfect symmetry (the ±0.0pp law), bit-identical seed replay, net arming and provably changing play, page constants pinned, boundary monotone, 20,000-block true-null stream without a false verdict, +5pp true edge certifying in ~1,200 games.
+
 ## v0.2.2 — 2026-07-12
 - `nets/value-gym-v1.json` — first browser-gym-trained value net: 316,099 self-play games, 5.03M positions, 3.1 passes, holdout 17.7% better than the guessing baseline. Validated (shapes, finite, non-trivial) and smoke-tested through the ladder's `--net` path.
 - Title fight pre-registered: work = main + this net (netHorizon truncation) vs baseline = main without net, seeds 3000..3500 (3,000 paired games), verdict only if the seed-clustered 95% CI excludes 50%.
