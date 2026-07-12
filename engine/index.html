@@ -3529,6 +3529,7 @@ function featuresOf(st, idx){
   x[53]=(st.deck?st.deck.length:0)/106;
   x[54]=(st.discard?st.discard.length:0)/106;
   x[55]=1; // constant input
+  for(let i=0;i<FEAT_N;i++){ if(x[i]<0) x[i]=0; else if(x[i]>2) x[i]=2; } // rich endgames can overflow the scale caps — clamp so inputs stay bounded by construction
   return x;
 }
 let VALUE_NET = null; // {h1,h2,W1,b1,W2,b2,W3,b3} — plain arrays, loaded via loadValueNet

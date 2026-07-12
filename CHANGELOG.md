@@ -1,5 +1,19 @@
 # infinite-ai — Changelog
 
+## v0.2.1 — 2026-07-10
+The Learning Gym — AlphaZero-lite training you can watch.
+
+**engine/learn.html**
+- One engine worker per core plays greedy self-play and streams labelled positions (transferable Float32 batches, zero-copy); a dedicated engine-free training worker fits the value MLP continuously on the arriving stream, holding out every 10th record. On an 8-core machine this outproduces the CI generator ~5x while being fun to leave on a second monitor.
+- The show: a live learning curve diving under the dashed guessing baseline; a "smarter than guessing" headline percentage; calibration bars (predicted | actual) converging per decile; and the guesses strip — real never-trained-on positions as dots placed at the net's predicted win chance, green = that seat won, red = lost. Learning is literally the colours separating.
+- Weights checkpoint to localStorage every 2s and export as the same JSON `tests/selfplay.js --train` writes and `loadValueNet()` consumes — certify exports with the engine-ladder workflow (`net_file`) before promoting.
+
+**Hardening**
+- `featuresOf` now clamps to [0,2] — the gym's batch-integrity test caught rich endgame positions overflowing the scale caps (bank + asset divisors), so the bound now holds by construction everywhere (CLI, gym, in-engine inference).
+- New `npm run test:learn` (12 checks): gen-worker booted exactly as the browser does (ready-from-inside-the-eval, whole records, bounded features, binary labels wired to real winners), training-math convergence on a synthetic separable task (0.69 → <0.10), export shape validation, and gym-training ↔ engine-inference agreement to 1e-9 on identical weights.
+
+**Tests** — engine 43/43, selfplay sanity 7/7, learn parity 12/12, trainer sanity 6/6, trainer parity 27/27, ladder sanity 4/4.
+
 ## v0.2.0 — 2026-07-10
 The AlphaZero-lite loop opens: self-play data, a learned value net, and net-truncated search. The certified champion's behaviour is unchanged until a net is loaded — promotion stays ladder-gated.
 

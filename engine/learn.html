@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<!--
+  INFINITE-AI — the learning gym (AlphaZero-lite, watchable)
+  One engine worker per core plays self-play Coastline and streams labelled
+  positions; a dedicated training worker fits the value net continuously while the
+  data arrives. Watch the loss dive under the baseline, the calibration bars snap
+  into line, and the net's guesses (red = lost, green = won) separate in real time.
+  Export weights (same JSON as tests/selfplay.js --train) and certify them with the
+  engine-ladder workflow before promoting anything. Serve from a static host (e.g.
+  GitHub Pages) — it fetches index.html from its own directory. ONE tab at a time;
+  data lives in RAM (weights checkpoint to localStorage) — export before closing.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>infinite-ai — Learning Gym</title>
+<style>
+  *{ box-sizing:border-box; margin:0; }
+  body{ background:#101820; color:#e8eef4; font:15px/1.5 "Nunito Sans",system-ui,sans-serif; padding:20px; max-width:940px; margin:0 auto; }
+  h1{ font-size:22px; margin:4px 0 2px; } h1 em{ color:#4ecdc4; font-style:normal; }
+  .sub{ color:#8fa1b3; font-size:13px; margin-bottom:16px; }
+  .card{ background:#1a2430; border:1px solid #2a3644; border-radius:12px; padding:14px 16px; margin-bottom:14px; }
+  .cardtitle{ font-size:13px; color:#8fa1b3; text-transform:uppercase; letter-spacing:.08em; margin-bottom:10px; }
+  .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  button{ background:#4ecdc4; color:#101820; font:700 14px "Nunito Sans",system-ui,sans-serif; border:0; border-radius:8px; padding:9px 16px; cursor:pointer; }
+  button.sec{ background:#2a3644; color:#e8eef4; }
+  button:disabled{ opacity:.45; cursor:default; }
+  .badge{ font-size:12px; padding:2px 8px; border-radius:10px; background:#2a3644; color:#8fa1b3; }
+  .badge.on{ background:#173f2e; color:#4ecdc4; }
+  .hero{ display:flex; gap:26px; flex-wrap:wrap; }
+  .hero .h{ min-width:110px; }
+  .hero .n{ font-size:26px; font-weight:800; color:#4ecdc4; line-height:1.1; }
+  .hero .l{ font-size:12px; color:#8fa1b3; }
+  #smart{ color:#f4c95d; }
+  canvas{ width:100%; display:block; }
+  .calibrow{ display:grid; grid-template-columns: 64px 1fr 110px; gap:8px; align-items:center; font-size:12px; color:#8fa1b3; padding:2px 0; }
+  .calibtrack{ position:relative; height:12px; background:#0d141b; border-radius:6px; }
+  .calibtrack .pred{ position:absolute; top:0; bottom:0; width:3px; background:#f4c95d; border-radius:2px; }
+  .calibtrack .act{ position:absolute; top:2px; bottom:2px; width:3px; background:#4ecdc4; border-radius:2px; }
+  #strip{ position:relative; height:64px; background:#0d141b; border-radius:8px; overflow:hidden; }
+  #strip .mid{ position:absolute; left:50%; top:0; bottom:0; width:1px; background:#2a3644; }
+  #strip .dot{ position:absolute; width:9px; height:9px; border-radius:50%; transition:left 1.2s ease, top 1.2s ease; }
+  #strip .win{ background:#4ecdc4; } #strip .loss{ background:#ff6b6b; }
+  .legend{ font-size:12px; color:#8fa1b3; margin-top:6px; }
+  .legend b.g{ color:#4ecdc4; } .legend b.r{ color:#ff6b6b; } .legend b.y{ color:#f4c95d; }
+  #log{ font:12px/1.5 ui-monospace,monospace; color:#8fa1b3; max-height:120px; overflow-y:auto; white-space:pre-wrap; }
+  #fatal{ color:#ff6b6b; font-weight:700; display:none; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>infinite-ai <em>Learning Gym</em></h1>
+<div class="sub">Self-play streams in · the value net trains live · export weights, certify on the ladder. One tab; data lives in RAM — export before closing.</div>
+
+<div class="card">
+  <div class="row">
+    <button id="startbtn" disabled>Start</button>
+    <button id="pausebtn" class="sec" disabled>Pause</button>
+    <button id="exportbtn" class="sec" disabled>Export weights</button>
+    <button id="resetbtn" class="sec">Reset net</button>
+    <span id="wakebadge" class="badge">wake lock off</span>
+    <span id="poolbadge" class="badge">booting…</span>
+    <span id="runbadge" class="badge">loading engine…</span>
+  </div>
+  <div id="fatal"></div>
+</div>
+
+<div class="card">
+  <div class="hero">
+    <div class="h"><div class="n" id="s_games">–</div><div class="l">games played</div></div>
+    <div class="h"><div class="n" id="s_speed">–</div><div class="l">games / sec</div></div>
+    <div class="h"><div class="n" id="s_rows">–</div><div class="l">positions learned from</div></div>
+    <div class="h"><div class="n" id="s_epoch">–</div><div class="l">training passes</div></div>
+    <div class="h"><div class="n" id="smart">–</div><div class="l">smarter than guessing</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="cardtitle">Learning curve — lower is smarter</div>
+  <canvas id="lossc" width="900" height="150"></canvas>
+  <div class="legend"><b class="g">— net</b> &nbsp; <b style="color:#8fa1b3">- - guessing baseline</b></div>
+</div>
+
+<div class="card">
+  <div class="cardtitle">The net's guesses — live holdout positions it has never trained on</div>
+  <div id="strip"><div class="mid"></div></div>
+  <div class="legend">each dot is a real position placed at the net's predicted win chance (left 0% → right 100%) · <b class="g">green = that seat actually won</b> · <b class="r">red = it lost</b> · learning looks like the colours separating</div>
+</div>
+
+<div class="card">
+  <div class="cardtitle">Calibration — when it says 70%, does it win 70%?</div>
+  <div id="calib"></div>
+  <div class="legend"><b class="y">| predicted</b> &nbsp; <b class="g">| actual</b> — bars converge as the net gets honest</div>
+</div>
+
+<div class="card"><div id="log">gym log…</div></div>
+
+<script type="text/plain" id="worker-boot">
+/* Engine worker bootstrap — identical contract to trainer.html: stubs, then boot
+   message evals engine + core in ONE direct-eval scope (engine consts are
+   eval-scoped; the core posts its own ready). */
+const el = () => new Proxy({classList:{add(){},remove(){},toggle(){}},style:{}},{
+  get(t,k){ if(k in t) return t[k]; return ()=>{}; },
+  set(){ return true; }
+});
+self.document = { querySelector:()=>el(), querySelectorAll:()=>[], createElement:()=>el(), getElementById:()=>el(), addEventListener:()=>{}, body:{appendChild(){}} };
+self.window = self;
+self.requestAnimationFrame = fn=>fn();
+const timers = [];
+self.setTimeout = (fn)=>{ timers.push(fn); return timers.length; };
+self.clearTimeout = ()=>{};
+self.onmessage = function(e){
+  if(e.data.type!=='boot') return;
+  try{
+    eval(e.data.engine + '\n;\n' + e.data.core);
+  }catch(err){
+    self.postMessage({type:'fatal', msg:String((err&&err.message)||err)});
+  }
+};
+</script>
+
+<script type="text/plain" id="gen-core">
+/* Self-play generation core — the browser twin of tests/selfplay.js --gen.
+   Plays greedy self-play (MC off), samples positions at the aiStep chokepoint,
+   labels them at game end, and streams Float32Array batches (transferable). */
+log = function(){};
+MC_ON = false;
+function mb(seed){ let s=(seed>>>0)+0x9E3779B9; return function(){ s|=0; s=(s+0x6D2B79F5)|0;
+  let t=Math.imul(s^(s>>>15),1|s); t=(t+Math.imul(t^(t>>>7),61|t))^t; return ((t^(t>>>14))>>>0)/4294967296; }; }
+const pump = ()=>{ let n=0; while(timers.length && n<20000){ const f=timers.shift(); try{f();}catch(e){} n++; } };
+const trueRandom = Math.random;
+const SAMPLER = { p: 0.25, pend: null };
+const origAiStep = aiStep;
+aiStep = function(p){
+  if(SAMPLER.pend && !G.over && G.playsLeft>0 && Math.random() < SAMPLER.p)
+    SAMPLER.pend.push({ f: featuresOf(G, G.turn), seat: G.turn });
+  return origAiStep(p);
+};
+function playAndSample(seed, out){
+  timers.length = 0;
+  Math.random = mb(seed);
+  newGame();
+  G.players[0].isAI = true;
+  const pend = [];
+  SAMPLER.pend = pend;
+  startTurn(); pump();
+  let guard = 0;
+  while(!G.over && guard<600){ if(timers.length){ pump(); } else { aiStep(cur()); pump(); } guard++; }
+  SAMPLER.pend = null;
+  Math.random = trueRandom;
+  if(!G.over) return false;
+  const w = G.players.findIndex(q=>completeColors(q).length>=3);
+  pend.forEach(r=>{ for(let i=0;i<FEAT_N;i++) out.push(r.f[i]); out.push(r.seat===w ? 1 : 0); });
+  return true;
+}
+let RUNNING = false, SEED = 0;
+function loop(){
+  if(!RUNNING) return;
+  const out = [];
+  let games = 0;
+  const t0 = Date.now();
+  while(Date.now()-t0 < 450){ if(playAndSample(SEED++, out)) games++; }
+  const buf = new Float32Array(out);
+  self.postMessage({type:'batch', buf: buf.buffer, games}, [buf.buffer]);
+  realSetTimeout(loop, 0);
+}
+const realSetTimeout = (fn,ms)=>{ const id = timers.length; Promise.resolve().then(()=>{}); return setTimeoutReal(fn, ms); };
+// the boot shell hijacked setTimeout for the engine's timer queue — recover a real one
+const setTimeoutReal = (function(){ const mc = new MessageChannel(); const q = [];
+  mc.port1.onmessage = ()=>{ const f=q.shift(); if(f) f(); };
+  return (fn)=>{ q.push(fn); mc.port2.postMessage(0); }; })();
+self.onmessage = function(e){
+  const m = e.data;
+  if(m.type==='start'){ SEED = m.seedBase||0; SAMPLER.p = m.sample||0.25; if(!RUNNING){ RUNNING = true; loop(); } }
+  else if(m.type==='pause'){ RUNNING = false; }
+};
+self.postMessage({type:'ready', FEAT_N: FEAT_N});
+</script>
+
+<script type="text/plain" id="train-core">
+/* Training worker — engine-free, pure math. Accumulates streamed row chunks
+   (records of F floats + 1 label), holds out every 10th record, and trains the
+   value MLP continuously: one mini-pass over random rows, then a holdout eval,
+   posted as metrics with sample predictions for the dots strip. */
+let F = 0, REC = 0;
+const chunks = []; let rows = 0;
+let W = null; // {h1,h2,W1,b1,W2,b2,W3,b3} Float64 during training
+let M = null; // momentum buffers
+let training = false, passes = 0, seen = 0;
+const H1 = 64, H2 = 32, MOM = 0.9;
+function rnd(){ return Math.random(); }
+function initNet(fromJson){
+  if(fromJson){ W = { h1:fromJson.h1, h2:fromJson.h2,
+    W1:Float64Array.from(fromJson.W1), b1:Float64Array.from(fromJson.b1),
+    W2:Float64Array.from(fromJson.W2), b2:Float64Array.from(fromJson.b2),
+    W3:Float64Array.from(fromJson.W3), b3:Float64Array.from(fromJson.b3) }; }
+  else{
+    const init = (len, fan)=>{ const a=new Float64Array(len); const s=Math.sqrt(2/fan);
+      for(let i=0;i<len;i++) a[i]=(rnd()*2-1)*s; return a; };
+    W = { h1:H1, h2:H2, W1:init(H1*F,F), b1:new Float64Array(H1),
+          W2:init(H2*H1,H1), b2:new Float64Array(H2), W3:init(H2,H2), b3:new Float64Array(1) };
+  }
+  M = { W1:new Float64Array(W.h1*F), b1:new Float64Array(W.h1),
+        W2:new Float64Array(W.h2*W.h1), b2:new Float64Array(W.h2),
+        W3:new Float64Array(W.h2), b3:new Float64Array(1) };
+  passes = 0; seen = 0;
+}
+function rowAt(k){ // (chunkArray, offset) for global row k
+  let i = 0, r = k;
+  while(r >= chunks[i].rows){ r -= chunks[i].rows; i++; }
+  return { a: chunks[i].a, o: r*REC };
+}
+const h1buf = [], h2buf = [];
+function forward(a, o){
+  const h1 = h1buf, h2 = h2buf;
+  for(let j=0;j<W.h1;j++){ let s=W.b1[j]; const off=j*F; for(let i=0;i<F;i++) s+=W.W1[off+i]*a[o+i]; h1[j]=s>0?s:0; }
+  for(let j=0;j<W.h2;j++){ let s=W.b2[j]; const off=j*W.h1; for(let i=0;i<W.h1;i++) s+=W.W2[off+i]*h1[i]; h2[j]=s>0?s:0; }
+  let s=W.b3[0]; for(let i=0;i<W.h2;i++) s+=W.W3[i]*h2[i];
+  return 1/(1+Math.exp(-s));
+}
+function trainSome(n, lr){
+  const d1 = new Float64Array(W.h1), d2 = new Float64Array(W.h2);
+  for(let t=0;t<n;t++){
+    let k = (Math.random()*rows)|0; if(k%10===0) k = (k+1)%rows; // every 10th row is holdout
+    const {a,o} = rowAt(k), y = a[o+F];
+    const p = forward(a,o), g = p-y;
+    const h1 = h1buf, h2 = h2buf;
+    for(let i=0;i<W.h2;i++) d2[i] = h2[i]>0 ? W.W3[i]*g : 0;
+    for(let j=0;j<W.h1;j++){ let s=0; for(let i=0;i<W.h2;i++) s+=d2[i]*W.W2[i*W.h1+j]; d1[j] = h1[j]>0 ? s : 0; }
+    for(let i=0;i<W.h2;i++){ M.W3[i]=MOM*M.W3[i]-lr*g*h2[i]; W.W3[i]+=M.W3[i]; }
+    M.b3[0]=MOM*M.b3[0]-lr*g; W.b3[0]+=M.b3[0];
+    for(let j=0;j<W.h2;j++){ const off=j*W.h1, dj=d2[j];
+      if(dj!==0){ for(let i=0;i<W.h1;i++){ M.W2[off+i]=MOM*M.W2[off+i]-lr*dj*h1[i]; W.W2[off+i]+=M.W2[off+i]; } }
+      M.b2[j]=MOM*M.b2[j]-lr*dj; W.b2[j]+=M.b2[j]; }
+    for(let j=0;j<W.h1;j++){ const off=j*F, dj=d1[j];
+      if(dj!==0){ for(let i=0;i<F;i++){ M.W1[off+i]=MOM*M.W1[off+i]-lr*dj*a[o+i]; W.W1[off+i]+=M.W1[off+i]; } }
+      M.b1[j]=MOM*M.b1[j]-lr*dj; W.b1[j]+=M.b1[j]; }
+  }
+  seen += n;
+}
+function evalHoldout(maxN){
+  let loss=0, base=0, ySum=0, n=0;
+  const calib = Array.from({length:10},()=>({n:0,y:0,p:0}));
+  const dots = [];
+  const step = Math.max(10, Math.floor(rows/ (maxN*10)) * 10);
+  for(let k=0;k<rows && n<maxN;k+=step){
+    const {a,o} = rowAt(k), y = a[o+F];
+    const p = Math.min(0.999, Math.max(0.001, forward(a,o)));
+    loss += -(y*Math.log(p)+(1-y)*Math.log(1-p));
+    ySum += y; n++;
+    const b = Math.min(9,(p*10)|0); calib[b].n++; calib[b].y+=y; calib[b].p+=p;
+    if(dots.length<14 && Math.random()<0.02) dots.push({p:+p.toFixed(3), y});
+  }
+  const p0 = Math.min(0.999, Math.max(0.001, ySum/n));
+  for(let k=0;k<rows && base/1<1e9;k+=step){} // (base computed from p0 below)
+  base = -(p0*Math.log(p0)+(1-p0)*Math.log(1-p0));
+  // exact base-rate loss over same sample:
+  let bl=0; for(let k=0,m=0;k<rows&&m<n;k+=step,m++){ const {a,o}=rowAt(k); const y=a[o+F]; bl += -(y*Math.log(p0)+(1-y)*Math.log(1-p0)); }
+  return { loss: loss/n, base: bl/n, calib, dots, n };
+}
+function exportJson(){
+  return { feat:'v1', FEAT_N:F, h1:W.h1, h2:W.h2,
+    W1:Array.from(W.W1), b1:Array.from(W.b1), W2:Array.from(W.W2), b2:Array.from(W.b2),
+    W3:Array.from(W.W3), b3:Array.from(W.b3),
+    meta:{ trained:new Date().toISOString(), rows, seen, source:'learn.html' } };
+}
+function loop(){
+  if(!training) return;
+  if(rows > 2000){
+    const lr = 0.004 * Math.pow(0.7, Math.min(6, seen/2e6));
+    trainSome(Math.min(60000, rows), lr);
+    passes = seen/Math.max(1,rows);
+    const ev = evalHoldout(15000);
+    self.postMessage({ type:'metrics', rows, seen, passes:+passes.toFixed(1),
+      loss:+ev.loss.toFixed(4), base:+ev.base.toFixed(4), dots:ev.dots,
+      calib: ev.calib.map(c=>({n:c.n, pred:c.n?c.p/c.n:0, act:c.n?c.y/c.n:0})) });
+  }
+  setTimeout(loop, 30);
+}
+self.onmessage = function(e){
+  const m = e.data;
+  if(m.type==='init'){ F = m.FEAT_N; REC = F+1; if(!W) initNet(m.warm||null); h1buf.length=64; h2buf.length=32; }
+  else if(m.type==='data'){ const a = new Float32Array(m.buf); chunks.push({a, rows: a.length/REC}); rows += a.length/REC; }
+  else if(m.type==='trainStart'){ if(!training){ training = true; loop(); } }
+  else if(m.type==='trainStop'){ training = false; }
+  else if(m.type==='export'){ self.postMessage({type:'weights', w: exportJson()}); }
+  else if(m.type==='reset'){ initNet(null); }
+};
+self.postMessage({type:'trainerReady'});
+</script>
+
+<script>
+(async function(){
+  const KEY = 'infinite_ai_gym_net_v1';
+  const $id = s=>document.getElementById(s);
+  let running = false, wakeLock = null;
+  let games = 0, rows = 0, lastGames = 0, lastT = Date.now(), speed = '0';
+  const lossHist = [];
+  let FEAT = 0;
+
+  function logLine(s){ const el = $id('log'); el.textContent += '\n'+s;
+    if(el.textContent.length>30000) el.textContent = el.textContent.slice(-20000);
+    el.scrollTop = el.scrollHeight; }
+  function fatal(msg){ $id('fatal').style.display='block'; $id('fatal').textContent='ENGINE ERROR: '+msg; }
+
+  /* ---- boot: engine gen-workers + pure-js train worker ---- */
+  const engine = await (async ()=>{
+    const html = await (await fetch('index.html', {cache:'no-store'})).text();
+    return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]).join('\n;\n');
+  })().catch(()=>{ fatal('could not fetch index.html — serve this page from the engine/ directory'); return null; });
+  if(!engine) return;
+
+  const boot = $id('worker-boot').textContent;
+  const genCore = $id('gen-core').textContent;
+  const trainer = new Worker(URL.createObjectURL(new Blob([$id('train-core').textContent], {type:'text/javascript'})));
+  const N = Math.max(1, (navigator.hardwareConcurrency||4) - 2); // leave a core for the trainer + UI
+  const gens = []; let ready = 0;
+
+  trainer.onmessage = (e)=>{
+    const m = e.data;
+    if(m.type==='trainerReady'){ logLine('training worker ready'); return; }
+    if(m.type==='weights'){
+      try{ localStorage.setItem(KEY, JSON.stringify(m.w)); }catch(err){}
+      if(pendingExport){
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([JSON.stringify(m.w)], {type:'application/json'}));
+        a.download = 'value-v1.json'; a.click();
+        pendingExport = false; logLine('weights exported ('+m.w.meta.rows+' rows, '+m.w.meta.seen+' samples seen)');
+      }
+      return;
+    }
+    if(m.type==='metrics') onMetrics(m);
+  };
+  let pendingExport = false;
+
+  for(let i=0;i<N;i++){
+    const w = new Worker(URL.createObjectURL(new Blob([boot], {type:'text/javascript'})));
+    w.onmessage = (e)=>{
+      const m = e.data;
+      if(m.type==='fatal'){ fatal(m.msg); return; }
+      if(m.type==='ready'){
+        FEAT = m.FEAT_N; ready++;
+        $id('poolbadge').textContent = ready+'/'+N+' players + 1 coach';
+        if(ready===N){
+          let warm = null; try{ warm = JSON.parse(localStorage.getItem(KEY)||'null'); }catch(err){}
+          trainer.postMessage({type:'init', FEAT_N: FEAT, warm});
+          $id('runbadge').textContent = warm ? 'net restored from checkpoint' : 'fresh net';
+          if(warm) logLine('restored net checkpoint ('+(warm.meta&&warm.meta.rows||'?')+' rows of prior training)');
+          $id('startbtn').disabled = false;
+        }
+        return;
+      }
+      if(m.type==='batch'){
+        games += m.games;
+        rows += new Float32Array(m.buf).length/(FEAT+1);
+        trainer.postMessage({type:'data', buf:m.buf}, [m.buf]);
+      }
+    };
+    w.postMessage({type:'boot', engine, core: genCore});
+    gens.push(w);
+  }
+
+  /* ---- visuals ---- */
+  function onMetrics(m){
+    $id('s_rows').textContent = m.rows.toLocaleString();
+    $id('s_epoch').textContent = m.passes;
+    const smart = (1 - m.loss/m.base)*100;
+    $id('smart').textContent = smart.toFixed(1)+'%';
+    lossHist.push({loss:m.loss, base:m.base});
+    if(lossHist.length>240) lossHist.shift();
+    drawLoss();
+    drawCalib(m.calib);
+    drawDots(m.dots);
+  }
+  function drawLoss(){
+    const cv = $id('lossc'), ctx = cv.getContext('2d');
+    ctx.clearRect(0,0,cv.width,cv.height);
+    if(!lossHist.length) return;
+    const lo = 0.40, hi = 0.70, y = v=>cv.height-6-((Math.min(hi,Math.max(lo,v))-lo)/(hi-lo))*(cv.height-12);
+    ctx.strokeStyle='#8fa1b3'; ctx.setLineDash([4,4]); ctx.beginPath();
+    ctx.moveTo(0, y(lossHist[lossHist.length-1].base)); ctx.lineTo(cv.width, y(lossHist[lossHist.length-1].base)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle='#4ecdc4'; ctx.lineWidth=2; ctx.beginPath();
+    lossHist.forEach((p,i)=>{ const x = lossHist.length===1? cv.width/2 : 6+i*(cv.width-12)/(lossHist.length-1);
+      i?ctx.lineTo(x,y(p.loss)):ctx.moveTo(x,y(p.loss)); });
+    ctx.stroke();
+  }
+  function drawCalib(calib){
+    $id('calib').innerHTML = calib.map((c,i)=>{
+      if(c.n<50) return '';
+      return '<div class="calibrow"><span>'+(i*10)+'–'+(i*10+10)+'%</span>'+
+        '<div class="calibtrack"><div class="pred" style="left:'+(c.pred*100).toFixed(1)+'%"></div>'+
+        '<div class="act" style="left:'+(c.act*100).toFixed(1)+'%"></div></div>'+
+        '<span>'+(c.pred*100).toFixed(0)+'% → '+(c.act*100).toFixed(0)+'% (n='+c.n+')</span></div>';
+    }).join('');
+  }
+  let dotEls = [];
+  function drawDots(dots){
+    const strip = $id('strip');
+    while(dotEls.length < dots.length){
+      const d = document.createElement('div'); d.className='dot'; strip.appendChild(d); dotEls.push(d);
+    }
+    dots.forEach((p,i)=>{
+      const d = dotEls[i];
+      d.className = 'dot '+(p.y===1?'win':'loss');
+      d.style.left = 'calc('+(p.p*100).toFixed(1)+'% - 4px)';
+      d.style.top = (8 + (i%4)*13)+'px';
+    });
+  }
+
+  /* ---- hero ticker ---- */
+  setInterval(()=>{
+    $id('s_games').textContent = games.toLocaleString();
+    const now = Date.now();
+    speed = Math.round((games-lastGames)/Math.max(0.5,(now-lastT)/1000)).toLocaleString();
+    lastGames = games; lastT = now;
+    $id('s_speed').textContent = running ? speed : '⏸';
+    if(running) trainer.postMessage({type:'export'}); // checkpoint weights to localStorage each tick
+  }, 2000);
+
+  async function setWake(on){
+    try{
+      if(on && 'wakeLock' in navigator){ wakeLock = await navigator.wakeLock.request('screen');
+        $id('wakebadge').textContent='wake lock on'; $id('wakebadge').className='badge on';
+        wakeLock.addEventListener('release', ()=>{ $id('wakebadge').textContent='wake lock off'; $id('wakebadge').className='badge'; });
+      } else if(!on && wakeLock){ await wakeLock.release(); wakeLock=null; }
+    }catch(e){ $id('wakebadge').textContent='wake lock unavailable'; }
+  }
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && running) setWake(true); });
+
+  /* ---- controls ---- */
+  $id('startbtn').onclick = ()=>{
+    running = true;
+    gens.forEach((w,i)=>w.postMessage({type:'start', seedBase: Date.now()%100000 + i*10000000, sample:0.25}));
+    trainer.postMessage({type:'trainStart'});
+    $id('startbtn').disabled = true; $id('pausebtn').disabled = false; $id('exportbtn').disabled = false;
+    $id('runbadge').textContent = 'learning…'; setWake(true);
+    logLine('gym open: '+N+' players sparring, coach training on the stream');
+  };
+  $id('pausebtn').onclick = ()=>{
+    running = false;
+    gens.forEach(w=>w.postMessage({type:'pause'}));
+    trainer.postMessage({type:'trainStop'});
+    $id('startbtn').disabled = false; $id('pausebtn').disabled = true;
+    $id('runbadge').textContent = 'paused'; setWake(false);
+  };
+  $id('exportbtn').onclick = ()=>{ pendingExport = true; trainer.postMessage({type:'export'}); };
+  $id('resetbtn').onclick = ()=>{
+    if(running){ logLine('pause before resetting'); return; }
+    if(!confirm('Reset the net? Prior training is discarded (export first if you want it). Collected data is kept.')) return;
+    localStorage.removeItem(KEY); trainer.postMessage({type:'reset'});
+    lossHist.length = 0; drawLoss(); logLine('net reset');
+  };
+})();
+</script>
+</body>
+</html>
