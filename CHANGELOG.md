@@ -1,5 +1,9 @@
 # infinite-ai — Changelog
 
+## v0.2.2 — 2026-07-12
+- `nets/value-gym-v1.json` — first browser-gym-trained value net: 316,099 self-play games, 5.03M positions, 3.1 passes, holdout 17.7% better than the guessing baseline. Validated (shapes, finite, non-trivial) and smoke-tested through the ladder's `--net` path.
+- Title fight pre-registered: work = main + this net (netHorizon truncation) vs baseline = main without net, seeds 3000..3500 (3,000 paired games), verdict only if the seed-clustered 95% CI excludes 50%.
+
 ## v0.2.1 — 2026-07-10
 The Learning Gym — AlphaZero-lite training you can watch.
 
