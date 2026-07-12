@@ -1,5 +1,8 @@
 # infinite-ai — Changelog
 
+## v0.3.1 — 2026-07-12
+**NEW CHAMPION: the net brain.** First Arena verdict — main + nets/value-gym-v1.json is STRONGER than main (crossed at 2,412 games, 52.78% ± 2.73pp, anytime-valid alpha=0.05, fresh seeds 50000+). Verdict record: ladder-results/20260712-arena-net-v1-STRONGER.md. The AlphaZero flywheel's first lap paid off; README champion line updated.
+
 ## v0.3.0 — 2026-07-12
 The Arena — browser title fights that run until they KNOW.
 

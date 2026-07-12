@@ -2,6 +2,10 @@
 
 Mission: build the **strongest possible player** for Coastline (a 1:1 Monopoly Deal rebuild) and, from the same brain, a chess.com-style **game review** (win% graphs, accuracy, move labels). Extracted from [infinite-table](https://github.com/joshelms43/infinite-table) so the game and the lab evolve independently — the game repo consumes certified brains; this repo produces them.
 
+## CURRENT CHAMPION
+
+`engine/index.html` + `nets/value-gym-v1.json` loaded via `loadValueNet()` — the net-guided MCTS brain, certified STRONGER in the Arena (52.78% ± 2.73pp at crossing, anytime-valid alpha=0.05, fresh seeds; ladder-results/20260712-arena-net-v1-STRONGER.md). Lineage: greedy champion -> +MCTS (+1.31pp, 9,000 games) -> +value net (flywheel lap 1).
+
 ## Current champion: determinized Monte Carlo (ISMCTS-lite)
 On contentious decisions (greedy's top candidates within 2.0 ev) the brain samples 8 hidden-card worlds consistent with exact 106-card counting, plays each 16 half-turns forward with real rules, and picks the action winning the most futures. Obvious plays stay greedy and instant.
 
