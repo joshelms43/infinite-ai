@@ -116,6 +116,16 @@ if(trainScope){
   const w = trainScope.exportJson();
   check('exported weights carry the right shapes',
     w.W1.length===w.h1*Fs && w.W2.length===w.h2*w.h1 && w.W3.length===w.h2 && w.FEAT_N===Fs);
+  // regression: 'load' must overwrite an EXISTING net (init refuses; the gen-2 warm-start bug)
+  const beforeLoad = trainScope.evalHoldout(500).loss;
+  trainScope.initNet(null); // simulate reset to random
+  const rndLoss = trainScope.evalHoldout(500).loss;
+  trainScope.initNet(w);    // load path force-loads trained weights back
+  const afterLoad = trainScope.evalHoldout(500).loss;
+  check('force-load restores a trained net over an existing one ('+rndLoss.toFixed(2)+' -> '+afterLoad.toFixed(2)+')',
+    afterLoad < rndLoss/2 && Math.abs(afterLoad-beforeLoad) < 1e-9);
+  const hasCap = /const PASS_CAP = 8/.test(require('fs').readFileSync(require('path').join(ROOT,'engine','learn.html'),'utf8'));
+  check('trainer pins the pass cap (slow streams cannot be overfit)', hasCap);
   // engine functions live inside a boot eval scope — reach them via a fresh bridge boot
   bootWorker('log = function(){}; loadValueNet('+JSON.stringify(w)+'); newGame(); self.postMessage({type:"probe", p: netValue(G,0), f: featuresOf(G,0)});');
   const probeMsg = outbox.find(m=>m.type==='probe');

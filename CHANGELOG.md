@@ -1,5 +1,11 @@
 # infinite-ai — Changelog
 
+## v0.4.1 — 2026-07-12
+Gen-2 training fixes (user-reported: gym showing -40% smarter than guessing).
+- Warm-start bug: mode switch sent reset-then-init, but init only loads weights into an EMPTY net — gen-2 actually began from random weights while claiming to warm-start from the champion. New 'load' message force-loads; mode switch uses it.
+- Overfit bug: the trainer runs at full speed regardless of stream rate; gen-2 games arrive ~40x slower than gen-1, so the first few games were ground through hundreds of epochs. New PASS_CAP=8: training idles until fresh data arrives (gen-1 unaffected — its stream outruns the trainer).
+- learn parity: force-load regression check + pass-cap pin (16 checks).
+
 ## v0.4.0 — 2026-07-12
 Three candidates enter the Arena: search reinvestment, JSN search, gen-2 training.
 

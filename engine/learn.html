@@ -274,9 +274,10 @@ function exportJson(){
     W3:Array.from(W.W3), b3:Array.from(W.b3),
     meta:{ trained:new Date().toISOString(), rows, seen, source:'learn.html' } };
 }
+const PASS_CAP = 8; // max epochs over the buffer — slow generators (gen-2) must not be ground into overfit
 function loop(){
   if(!training) return;
-  if(rows > 2000){
+  if(rows > 2000 && seen/Math.max(1,rows) < PASS_CAP){
     const lr = 0.004 * Math.pow(0.7, Math.min(6, seen/2e6));
     trainSome(Math.min(60000, rows), lr);
     passes = seen/Math.max(1,rows);
@@ -295,6 +296,7 @@ self.onmessage = function(e){
   else if(m.type==='trainStop'){ training = false; }
   else if(m.type==='export'){ self.postMessage({type:'weights', w: exportJson()}); }
   else if(m.type==='reset'){ initNet(null); }
+  else if(m.type==='load'){ initNet(m.w||null); } // force-load: warm starts after a net already exists
 };
 self.postMessage({type:'trainerReady'});
 </script>
@@ -473,8 +475,7 @@ self.postMessage({type:'trainerReady'});
       // gen-2 default: warm-start from the champion's own net and refine on its games
       try{ warm = await champ(); logLine('gen-2: warm-starting from the champion net'); }catch(e){}
     }
-    trainer.postMessage({type:'reset'});
-    if(warm) trainer.postMessage({type:'init', FEAT_N: FEAT, warm});
+    trainer.postMessage({type:'load', w: warm}); // null = fresh random net
     lossHist.length = 0; drawLoss();
     logLine('mode: '+MODE()+(warm?' (net restored)':' (fresh net)'));
   };
