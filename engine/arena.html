@@ -298,6 +298,8 @@ const PRESETS = {
                  work:{net:1, patch:'MC.jsn=1; MC.det=16; MC.topK=6; MC.margin=1.2;'}, base:{net:1, patch:'MC.jsn=0;'} },
   'net-v1':    { label:'HISTORIC: net  vs  pre-net champion (already certified)',
                  work:{net:1, patch:'MC.jsn=0;'},                                base:{net:0, patch:'MC.jsn=0;'} },
+  'fisherking':{ label:'CHALLENGER: GPT-FisherKing v1 (heuristic)  vs  champion (net)',
+                 work:{net:0, patch:'/* GPT-FisherKing v1 is fetched from gpt-fisherking-v1.js at runtime */'}, base:{net:1, patch:'MC.jsn=0;'} },
   'sanity':    { label:'SANITY: self-match — must pin 50.0%',
                  work:{net:0, patch:'MC.jsn=0;'},                                base:{net:0, patch:'MC.jsn=0;'} },
 };
@@ -390,6 +392,14 @@ async function loadNet(){
   $id('netInfo').textContent = 'net: '+netW.FEAT_N+' features'+(pasted?' (pasted)':' (repo)');
 }
 
+let fkPatch = null;
+async function loadFisherKing(){
+  if(fkPatch!==null) return;
+  try{ fkPatch = await (await fetch('gpt-fisherking-v1.js')).text(); }
+  catch(e){ fkPatch=''; err('could not load gpt-fisherking-v1.js: '+e.message); }
+  PRESETS.fisherking.work.patch = fkPatch || '/* fisherking source missing */';
+}
+
 /* ---------- render ---------- */
 const fmtPct = x => (x*100).toFixed(2)+'%';
 const fmtPp  = x => (x*100).toFixed(2);
@@ -415,8 +425,8 @@ function render(){
   if(ST.verdict){
     const v = ST.verdict;
     b.className = v.kind;
-    b.textContent = v.kind==='win' ? 'VERDICT: NET BRAIN IS STRONGER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
-      : v.kind==='lose' ? 'VERDICT: NET BRAIN IS WEAKER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
+    b.textContent = v.kind==='win' ? 'VERDICT: WORK (GREEN) IS STRONGER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
+      : v.kind==='lose' ? 'VERDICT: WORK (GREEN) IS WEAKER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
       : 'VERDICT: PRACTICAL NULL — any effect is smaller than ±0.5pp ('+v.atGames.toLocaleString()+' games)';
   } else {
     b.className = 'run';
@@ -461,6 +471,7 @@ async function start(){
   try{
     if(!engineSrc) await loadSources();
     await loadNet();
+    if(MODE==='fisherking') await loadFisherKing();
   }catch(e){ err('setup failed: '+e.message); return; }
   if(pool.length===0) spawnPool();
   running = true; ST.t0 = Date.now(); ST.gamesAtT0 = totals().games;

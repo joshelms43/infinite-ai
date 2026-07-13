@@ -1,5 +1,10 @@
 # infinite-ai — Changelog
 
+## v0.6.1 - 2026-07-13
+Arena challenger: GPT-FisherKing v1 (external, ChatGPT-authored) added as a pickable matchup.
+- `engine/gpt-fisherking-v1.js`: heuristic challenger - reuses the engine's legal move executor, swaps in its own positional evaluator + No Deal policy, MCTS/net off. Arena-safe wiring: closure-local hooks only, no global writes (those would clobber the per-seat dispatcher).
+- `engine/arena.html`: new "CHALLENGER: GPT-FisherKing v1 vs champion (net)" preset in the dropdown, fetched at runtime. Verified: builds as an isolated per-seat brain (champion brain unaffected), plays legally through the Node ladder (30/30 games decided). Real verdict awaits a full arena run.
+
 ## v0.6.0 - 2026-07-13
 Self-play throughput + the automated value-net flywheel. All engine changes are byte-identical (bit-for-bit parity + identical same-seed data); numbers measured in Node 22.
 
