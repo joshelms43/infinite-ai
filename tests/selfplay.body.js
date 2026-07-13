@@ -44,6 +44,7 @@
     else if(a==='--h2') opts.h2=+argv[++i];
     else if(a==='--lr') opts.lr=+argv[++i];
     else if(a==='--mc'){ opts.mc=true; }
+    else if(a==='--net') opts.net=argv[++i];
   }
   if(opts.mc) MC_ON = true;
   const REC = FEAT_N + 1;
@@ -82,6 +83,7 @@
   function gen(){
     const t0 = Date.now();
     const fd = fs.openSync(opts.file, 'a');
+    if(opts.net){ loadValueNet(JSON.parse(fs.readFileSync(opts.net,'utf8'))); console.log('gen: value net '+opts.net+' loaded (netHorizon rollouts)'); }
     let rows = 0, buf = [];
     const sink = (f, y)=>{ buf.push(...f, y); rows++;
       if(buf.length >= REC*512){ fs.writeSync(fd, Buffer.from(new Float32Array(buf).buffer)); buf = []; } };

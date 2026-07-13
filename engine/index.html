@@ -3257,7 +3257,7 @@ function mcWorld(st){
 let MC_PROTO = null, MC_ID = 5000000;
 function mcProtoOf(kind){ // one template card per census kind, fresh ids per sample
   if(!MC_PROTO){ MC_PROTO = {}; buildDeck().forEach(c=>{ const k = keyOf(c); if(!MC_PROTO[k]) MC_PROTO[k] = JSON.parse(JSON.stringify(c)); }); }
-  const c = JSON.parse(JSON.stringify(MC_PROTO[kind])); c.id = ++MC_ID; return c;
+  const c = mcCard(MC_PROTO[kind]); c.id = ++MC_ID; return c;
 }
 function determinize(selfIdx){ // a full world consistent with everything this seat can see
   const st = { players: G.players.map(mcPlayer), discard: mcCards(G.discard),
