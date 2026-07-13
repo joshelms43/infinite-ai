@@ -1,5 +1,8 @@
 # infinite-ai — Changelog
 
+## v0.6.2 - 2026-07-13
+Arena: two-brain picker. Replaced the fixed matchup dropdown with a brain registry + two selectors (green corner A vs red corner B) - run any brain against any other, including self-matches. Registry: champion (net+MCTS), +JSN search, +2x search, greedy (no net/MCTS), GPT-FisherKing v1. Per-matchup localStorage, dynamic title + verdict labels; same paired-seed protocol and anytime-valid verdict.
+
 ## v0.6.1 - 2026-07-13
 Arena challenger: GPT-FisherKing v1 (external, ChatGPT-authored) added as a pickable matchup.
 - `engine/gpt-fisherking-v1.js`: heuristic challenger - reuses the engine's legal move executor, swaps in its own positional evaluator + No Deal policy, MCTS/net off. Arena-safe wiring: closure-local hooks only, no global writes (those would clobber the per-seat dispatcher).

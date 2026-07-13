@@ -67,7 +67,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1><span class="work">WORK — net brain</span> vs <span class="base">BASE — the champion</span></h1>
+  <h1><span class="work" id="titleA">A</span> <span style="color:var(--dim)">vs</span> <span class="base" id="titleB">B</span></h1>
   <div class="sub">paired-seed title fight &middot; anytime-valid verdict (Robbins mixture, &alpha;=0.05) &middot; safe to watch, safe to leave overnight</div>
 
   <div id="banner" class="run">warming up&hellip;</div>
@@ -107,7 +107,8 @@
     <div class="panel" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:1">
       <button id="go" class="primary">start</button>
       <button id="reset">reset run</button>
-      <select id="netSel"></select>
+      <label class="legend" style="display:flex;gap:6px;align-items:center"><span style="color:var(--work)">green</span> <select id="brainA"></select></label>
+      <label class="legend" style="display:flex;gap:6px;align-items:center"><span style="color:var(--base)">red</span> <select id="brainB"></select></label>
       <span class="legend" id="netInfo"></span>
     </div>
   </div>
@@ -284,27 +285,31 @@ function verdictOf(t){
   return null;
 }
 
-/* ---------- experiments: pre-committed matchups ----------
-   Each preset defines both corners completely (net + config patch applied inside
-   that brain's own scope). The incumbent champion is ALWAYS "net, MC.jsn=0" — the
-   exact configuration certified on 2026-07-12; candidates change one thing at a
-   time (except full-stack, which is the shipping decision). */
-const PRESETS = {
-  'jsn':       { label:'CANDIDATE: net + JSN search  vs  champion (net)',
-                 work:{net:1, patch:'MC.jsn=1;'},                                base:{net:1, patch:'MC.jsn=0;'} },
-  'bigsearch': { label:'CANDIDATE: net + 2x search budget  vs  champion (net)',
-                 work:{net:1, patch:'MC.jsn=0; MC.det=16; MC.topK=6; MC.margin=1.2;'}, base:{net:1, patch:'MC.jsn=0;'} },
-  'fullstack': { label:'CANDIDATE: net + JSN + 2x search  vs  champion (net)',
-                 work:{net:1, patch:'MC.jsn=1; MC.det=16; MC.topK=6; MC.margin=1.2;'}, base:{net:1, patch:'MC.jsn=0;'} },
-  'net-v1':    { label:'HISTORIC: net  vs  pre-net champion (already certified)',
-                 work:{net:1, patch:'MC.jsn=0;'},                                base:{net:0, patch:'MC.jsn=0;'} },
-  'fisherking':{ label:'CHALLENGER: GPT-FisherKing v1 (heuristic)  vs  champion (net)',
-                 work:{net:0, patch:'/* GPT-FisherKing v1 is fetched from gpt-fisherking-v1.js at runtime */'}, base:{net:1, patch:'MC.jsn=0;'} },
-  'sanity':    { label:'SANITY: self-match — must pin 50.0%',
-                 work:{net:0, patch:'MC.jsn=0;'},                                base:{net:0, patch:'MC.jsn=0;'} },
+/* ---------- brain registry + two-corner picker ----------
+   Pick any brain for the green corner (A) and any for the red corner (B); they play
+   the ladder's paired-seed protocol against each other. Each brain is (net?, patch)
+   applied inside its own closure; patchFile brains are fetched at runtime. */
+const BRAINS = {
+  'champion':   { label:'Champion — net + MCTS',          net:1, patch:'MC.jsn=0;' },
+  'champ-jsn':  { label:'Net + MCTS + JSN search',        net:1, patch:'MC.jsn=1;' },
+  'champ-2x':   { label:'Net + MCTS + 2x search budget',  net:1, patch:'MC.jsn=0; MC.det=16; MC.topK=6; MC.margin=1.2;' },
+  'greedy':     { label:'Greedy — no net, no MCTS',       net:0, patch:'MC_ON=false;' },
+  'fisherking': { label:'GPT-FisherKing v1 (heuristic)',  net:0, patchFile:'gpt-fisherking-v1.js' },
 };
-let MODE = 'jsn';
-const storeKey = ()=>'coastline-arena-v2:'+MODE;
+let A_KEY = 'fisherking', B_KEY = 'champion';   // green corner vs red corner
+const patchCache = {};
+function brainNet(k){ return !!BRAINS[k].net; }
+function patchOf(k){ const b=BRAINS[k]; return b.patchFile ? (patchCache[b.patchFile]||'/* source missing */') : (b.patch||''); }
+async function resolvePatches(){
+  for(const k of [A_KEY, B_KEY]){ const b=BRAINS[k];
+    if(b.patchFile && patchCache[b.patchFile]==null){
+      try{ patchCache[b.patchFile] = await (await fetch(b.patchFile)).text(); }
+      catch(e){ patchCache[b.patchFile]=''; err('could not load '+b.patchFile+': '+e.message); }
+    }
+  }
+}
+function updateTitle(){ $id('titleA').textContent = BRAINS[A_KEY].label; $id('titleB').textContent = BRAINS[B_KEY].label; }
+const storeKey = ()=>'coastline-arena-v3:'+A_KEY+'_vs_'+B_KEY;
 function save(){
   try{
     localStorage.setItem(storeKey(), JSON.stringify({
@@ -358,10 +363,9 @@ function spawnPool(){
       const d = e.data;
       if(d.type==='fatal'){ err('worker fatal: '+d.msg); w.busySeed=null; return; }
       if(d.type==='ready'){
-        const pr = PRESETS[MODE];
         w.postMessage({type:'setup', aiSection,
-          workNet: pr.work.net?netW:null, baseNet: pr.base.net?netW:null,
-          workPatch: pr.work.patch, basePatch: pr.base.patch});
+          workNet: brainNet(A_KEY)?netW:null, baseNet: brainNet(B_KEY)?netW:null,
+          workPatch: patchOf(A_KEY), basePatch: patchOf(B_KEY)});
         return; // core posts ready from inside the boot eval
       }
       if(d.type==='armed'){ w.armed = true; if(running) dispatch(w); return; }
@@ -384,21 +388,13 @@ async function loadSources(){
   aiSection = engineSrc.slice(a,b).replace(/<\/script>\s*<script>/g, ';');
 }
 async function loadNet(){
-  const pr = PRESETS[MODE];
-  if(!pr.work.net && !pr.base.net){ netW = null; $id('netInfo').textContent = 'no net in this matchup'; return; }
+  if(!brainNet(A_KEY) && !brainNet(B_KEY)){ netW = null; $id('netInfo').textContent = 'no net in this matchup'; return; }
   const pasted = $id('pasteBox').value.trim();
   netW = pasted ? JSON.parse(pasted) : await (await fetch('../nets/value-gym-v1.json')).json();
   if(!netW.W1 || !netW.FEAT_N) throw new Error('weights JSON missing W1/FEAT_N');
   $id('netInfo').textContent = 'net: '+netW.FEAT_N+' features'+(pasted?' (pasted)':' (repo)');
 }
 
-let fkPatch = null;
-async function loadFisherKing(){
-  if(fkPatch!==null) return;
-  try{ fkPatch = await (await fetch('gpt-fisherking-v1.js')).text(); }
-  catch(e){ fkPatch=''; err('could not load gpt-fisherking-v1.js: '+e.message); }
-  PRESETS.fisherking.work.patch = fkPatch || '/* fisherking source missing */';
-}
 
 /* ---------- render ---------- */
 const fmtPct = x => (x*100).toFixed(2)+'%';
@@ -425,8 +421,8 @@ function render(){
   if(ST.verdict){
     const v = ST.verdict;
     b.className = v.kind;
-    b.textContent = v.kind==='win' ? 'VERDICT: WORK (GREEN) IS STRONGER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
-      : v.kind==='lose' ? 'VERDICT: WORK (GREEN) IS WEAKER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
+    b.textContent = v.kind==='win' ? 'VERDICT: '+BRAINS[A_KEY].label+' (green) IS STRONGER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
+      : v.kind==='lose' ? 'VERDICT: '+BRAINS[B_KEY].label+' (red) IS STRONGER — crossed at '+v.atGames.toLocaleString()+' games ('+fmtPct(v.share)+' ±'+fmtPp(v.hw)+'pp)'
       : 'VERDICT: PRACTICAL NULL — any effect is smaller than ±0.5pp ('+v.atGames.toLocaleString()+' games)';
   } else {
     b.className = 'run';
@@ -471,7 +467,7 @@ async function start(){
   try{
     if(!engineSrc) await loadSources();
     await loadNet();
-    if(MODE==='fisherking') await loadFisherKing();
+    await resolvePatches();
   }catch(e){ err('setup failed: '+e.message); return; }
   if(pool.length===0) spawnPool();
   running = true; ST.t0 = Date.now(); ST.gamesAtT0 = totals().games;
@@ -484,18 +480,19 @@ $id('reset').onclick = ()=>{
   if(!confirm('Discard this run’s '+totals().games+' games?')) return;
   ST.results.clear(); ST.hist = []; ST.verdict = null; save(); render();
 };
-Object.keys(PRESETS).forEach(k=>{
-  const o = document.createElement('option'); o.value = k; o.textContent = PRESETS[k].label;
-  $id('netSel').appendChild(o);
-});
-$id('netSel').value = MODE;
-$id('netSel').onchange = ()=>{
-  MODE = $id('netSel').value;
+function fillSel(sel, val){
+  Object.keys(BRAINS).forEach(k=>{ const o=document.createElement('option'); o.value=k; o.textContent=BRAINS[k].label; sel.appendChild(o); });
+  sel.value = val;
+}
+function onPick(){
+  A_KEY = $id('brainA').value; B_KEY = $id('brainB').value;
   if(running){ running = false; $id('go').textContent = 'start'; }
-  // different matchup = different experiment = its own stored run and its own workers
-  pool.forEach(w=>w.terminate()); pool = [];
-  load(); render();
-};
+  pool.forEach(w=>w.terminate()); pool = [];   // new matchup = new workers + its own stored run
+  updateTitle(); load(); render();
+}
+fillSel($id('brainA'), A_KEY); fillSel($id('brainB'), B_KEY);
+$id('brainA').onchange = onPick; $id('brainB').onchange = onPick;
+updateTitle();
 $id('pastePanel').style.display = 'block';
 $id('pasteBox').style.display = 'block';
 $id('pasteBox').placeholder = 'optional: paste weights JSON to override the repo net for net-armed sides';
