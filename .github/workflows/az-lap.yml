@@ -1,0 +1,46 @@
+# infinite-ai AlphaZero lap — one automated turn of the value-net flywheel.
+# Actions -> "az lap" -> Run workflow. Generates net-guided self-play with the current
+# champion, trains a candidate, certifies candidate-vs-champion on the ladder across a
+# screen + a fresh-seed confirmation, and PROMOTES the candidate into the champion file
+# only if it clears the ladder bar (CI excludes 50%) in BOTH. Verdict + nets commit to main.
+name: az lap
+on:
+  workflow_dispatch:
+    inputs:
+      games:    { description: "Net-guided self-play games to generate", default: "40000", required: true }
+      epochs:   { description: "Training epochs", default: "5", required: true }
+      screen:   { description: "Screen seed range a..b (500 seeds = 3,000 games)", default: "0..500", required: true }
+      confirm:  { description: "Fresh-seed confirmation range (must not overlap screen)", default: "500..1000", required: true }
+      champion: { description: "Champion net to challenge and promote into", default: "nets/value-champion.json", required: true }
+permissions:
+  contents: write
+jobs:
+  lap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: suites must be green before any measurement
+        run: |
+          npm test
+          node tests/selfplay.js --sanity
+          node tests/ladder.js --sanity work work
+      - name: run one AlphaZero lap (gen -> train -> screen -> confirm -> promote/keep)
+        run: |
+          node tests/lap.js \
+            --champion "${{ github.event.inputs.champion }}" \
+            --games "${{ github.event.inputs.games }}" \
+            --epochs "${{ github.event.inputs.epochs }}" \
+            --screen "${{ github.event.inputs.screen }}" \
+            --confirm "${{ github.event.inputs.confirm }}" | tee /tmp/lap.log
+          tail -25 /tmp/lap.log >> "$GITHUB_STEP_SUMMARY"
+      - name: commit candidate net, verdict, and any promotion
+        run: |
+          git config user.name "az-lap[bot]"
+          git config user.email "az-lap@users.noreply.github.com"
+          git add nets ladder-results
+          git commit -m "az lap $(date -u +%Y%m%dT%H%M%SZ) (run ${{ github.run_id }})" || { echo "nothing to commit"; exit 0; }
+          git push origin HEAD:main

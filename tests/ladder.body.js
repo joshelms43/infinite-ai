@@ -48,6 +48,7 @@
     else if(a==='--report') opts.report = argv[++i];
     else if(a==='--sanity') opts.sanity = true;
     else if(a==='--net') opts.net = argv[++i];
+    else if(a==='--nets') opts.nets = argv[++i].split(',');
     else opts.specs.push(a);
   }
 
@@ -204,6 +205,9 @@
     let armed = 0;
     brains.forEach(b=>{ if(b.name.startsWith('work') && b.loadValueNet){ b.loadValueNet(w); armed++; } });
     console.log('value net '+opts.net+' loaded into '+armed+' work brain(s)');
+  }
+  if(opts.nets){ // per-brain nets aligned to spec order — enables candidate-net vs champion-net laps
+    opts.nets.forEach((nf,i)=>{ nf=nf&&nf.trim(); if(nf && brains[i] && brains[i].loadValueNet){ brains[i].loadValueNet(JSON.parse(fs.readFileSync(nf,'utf8'))); console.log('net '+nf+' -> '+brains[i].name); } });
   }
   if(opts.sanity){ sanity(brains[0], brains[1]); return; }
 
