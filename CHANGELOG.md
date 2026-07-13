@@ -1,5 +1,24 @@
 # infinite-ai — Changelog
 
+## v0.6.0 - 2026-07-13
+Self-play throughput + the automated value-net flywheel. All engine changes are byte-identical (bit-for-bit parity + identical same-seed data); numbers measured in Node 22.
+
+**Engine speedups (no behaviour change):**
+- `unseenFor()` cached within the frozen-G search window (mctsChoose/jsnSearch set UNSEEN_CACHE, restored in a finally). It was ~41% of a mid-game rolloutValue and is a pure function of G, which is read-only during a search. +1.24x isolated rollouts, ~1.36x on guided+net self-play; trainer.parity bit-for-bit, arena.parity symmetric, same-seed `--gen` data identical.
+- `mcProtoOf` determinize clone: `JSON.parse(JSON.stringify)` -> the engine's `mcCard` shallow clone. determinize() 1.57x, determinized worlds byte-identical.
+
+**Training pipeline:**
+- `tests/selfplay.js --net <weights>`: load a value net during `--gen` so rollouts use netHorizon (16->6), ~2.5x cheaper generation (also = gen-2 champion data).
+- `tests/selfplay.par.js` (new): shard `--gen` across cores; near-linear (4 workers 130->278 games/s here).
+
+**Ladder:**
+- `tests/ladder.js --nets a.json,b.json`: per-brain nets aligned to spec order (each version's AI section is its own closure, so VALUE_NET is per-brain). Enables candidate-net vs champion-net laps. Back-compat: `--net` unchanged; same net both sides = 50.0% +/- 0.0pp.
+
+**Flywheel automation:**
+- `tests/lap.js` (new): one AlphaZero lap - gen (champion-guided, parallel) -> train candidate -> certify candidate-vs-champion across a screen + a fresh-seed confirmation -> promote into `nets/value-champion.json` ONLY on clearing the CI-excludes-50% bar in BOTH (two independent one-look tests; winner's-curse discipline, not a bypass).
+- `.github/workflows/az-lap.yml` (new): runs a lap on CI (suites-gated), commits candidate + verdict, promotes on double-pass.
+- `nets/value-champion.json` (new): canonical champion pointer, seeded from value-gym-v1.json. NOTE: champion nets were certified on the pre-v0.5.0 economy - run an az lap to re-establish the champion on the corrected rules.
+
 ## v0.5.0 — 2026-07-12
 RULES AUDIT: economy aligned to official Monopoly Deal (user-requested 1:1 check).
 
