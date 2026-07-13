@@ -2945,7 +2945,9 @@ function deckCensus(){
   CENSUS = { m, tot };
   return CENSUS;
 }
+let UNSEEN_CACHE = null; // {} while a search holds G frozen (keyed by selfIdx); unseenFor is pure over G, so cached === identical, just fewer full-board rescans
 function unseenFor(selfIdx){
+  if(UNSEEN_CACHE && UNSEEN_CACHE[selfIdx]) return UNSEEN_CACHE[selfIdx];
   // everything not visible to this player = deck + other hands, derived, reshuffle-proof
   const cen = deckCensus();
   const seen = {}; let seenTot = 0;
@@ -2959,7 +2961,9 @@ function unseenFor(selfIdx){
   });
   const m = {}; let tot = 0;
   Object.keys(cen.m).forEach(k=>{ const n=Math.max(0, cen.m[k]-(seen[k]||0)); m[k]=n; tot+=n; });
-  return { m, tot };
+  const res = { m, tot };
+  if(UNSEEN_CACHE) UNSEEN_CACHE[selfIdx] = res;
+  return res;
 }
 function pHoldsAtLeastOne(kindKey, holderIdx, selfIdx){
   const un = unseenFor(selfIdx);
@@ -3339,6 +3343,8 @@ function jsnSearch(decIdx, othIdx, desc, count, fx){ // >0 means blocking wins m
   const loss = isTk ? 14 : desc==='Sneaky Swipe' ? 6 : desc==='Rent' ? 6 : desc==='Call In a Favour' ? 5 : desc==='Swap Meet' ? 4 : 2;
   const n = Math.max(4, MC.det);
   let vPlay = 0, vPass = 0;
+  const _uc = UNSEEN_CACHE; UNSEEN_CACHE = {};
+  try {
   for(let d=0; d<n; d++){
     const stP = determinize(decIdx); // decline: outcome settles at current parity
     if(count%2===0) jsnFx(stP, origDef, origAtk, fx);
@@ -3352,6 +3358,7 @@ function jsnSearch(decIdx, othIdx, desc, count, fx){ // >0 means blocking wins m
     if(!blocked) jsnFx(stJ, origDef, origAtk, fx);
     vPlay += rolloutValue(stJ, decIdx);
   }
+  } finally { UNSEEN_CACHE = _uc; }
   return (vPlay - vPass)/n;
 }
 function mcTake(q, id){ const i=q.hand.findIndex(c=>c.id===id); return i>-1 ? q.hand.splice(i,1)[0] : null; }
@@ -3686,6 +3693,8 @@ function mctsChoose(idx, C){
   if(!MC_ON) return null;
   // contentious gate: obvious decisions stay greedy and instant
   if(C.length<2 || C[0].ev>=1000 || C[0].ev - C[1].ev > MC.margin) return null;
+  const _uc = UNSEEN_CACHE; UNSEEN_CACHE = {}; // freeze G-derived unseen for the whole search (G is read-only here)
+  try {
   const K = Math.min(MC.topK, C.length);
   const score = new Array(K).fill(0), tried = new Array(K).fill(0);
   for(let d=0; d<MC.det; d++){
@@ -3711,6 +3720,7 @@ function mctsChoose(idx, C){
     if(avg > bestAvg + 1e-9){ bestAvg = avg; best = a; }
   }
   return best > 0 ? C[best] : null; // only override greedy when a rival action wins the vote
+  } finally { UNSEEN_CACHE = _uc; }
 }
 function aiStep(p){
   if(G.over) return;
