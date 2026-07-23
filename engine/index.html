@@ -3689,24 +3689,44 @@ function rollout(st, cap){ // synchronous fast game from a determinized state; r
   }
   return -1; // undecided at the horizon — rolloutValue applies net or leader proxy
 }
+const NP_H1 = new Float64Array(64), NP_H2 = new Float64Array(64);
+function netPolicy(st, idx){ // softmax policy over the 14 slots; null if the net has no policy head
+  const w = VALUE_NET; if(!w || !w.Wp || !w.bp) return null;
+  const x = featuresOf(st, idx), H1 = w.h1, H2 = w.h2, h1 = NP_H1, h2 = NP_H2;
+  for(let j=0;j<H1;j++){ let a=w.b1[j]; const off=j*FEAT_N; for(let i=0;i<FEAT_N;i++) a+=w.W1[off+i]*x[i]; h1[j]=a>0?a:0; }
+  for(let j=0;j<H2;j++){ let a=w.b2[j]; const off=j*H1; for(let i=0;i<H1;i++) a+=w.W2[off+i]*h1[i]; h2[j]=a>0?a:0; }
+  const P = new Array(POLICY_N); let mx=-Infinity;
+  for(let j=0;j<POLICY_N;j++){ let a=w.bp[j]; const off=j*H2; for(let i=0;i<H2;i++) a+=w.Wp[off+i]*h2[i]; P[j]=a; if(a>mx)mx=a; }
+  let sum=0; for(let j=0;j<POLICY_N;j++){ P[j]=Math.exp(P[j]-mx); sum+=P[j]; } for(let j=0;j<POLICY_N;j++) P[j]/=sum;
+  return P;
+}
 function mctsChoose(idx, C){
   if(!MC_ON) return null;
-  // contentious gate: obvious decisions stay greedy and instant
-  if(C.length<2 || C[0].ev>=1000 || C[0].ev - C[1].ev > MC.margin) return null;
-  const _uc = UNSEEN_CACHE; UNSEEN_CACHE = {}; // freeze G-derived unseen for the whole search (G is read-only here)
+  if(C.length<2 || C[0].ev>=1000) return null;
+  const me = G.players[idx];
+  const P = netPolicy(G, idx); // learned priors over slots, or null (v1 net / no net -> identical to the old champion)
+  const greedyContentious = (C[0].ev - C[1].ev) <= MC.margin;
+  let policyDisagrees = false;
+  if(P){ let bs=0; for(let j=1;j<POLICY_N;j++) if(P[j]>P[bs]) bs=j; policyDisagrees = slotOf(C[0], me) !== bs; }
+  if(!greedyContentious && !policyDisagrees) return null; // truly obvious -> greedy, instant
+  const _uc = UNSEEN_CACHE; UNSEEN_CACHE = {}; // freeze G-derived unseen for the whole search
   try {
   const K = Math.min(MC.topK, C.length);
-  const score = new Array(K).fill(0), tried = new Array(K).fill(0);
+  const sel = [0]; // always evaluate greedy's top pick
+  if(P){ const ord = C.map((c,i)=>i).sort((a,b)=> (P[slotOf(C[b],me)]||0) - (P[slotOf(C[a],me)]||0));
+         for(const i of ord){ if(sel.indexOf(i)<0 && sel.length<K) sel.push(i); } }
+  else { for(let i=1;i<C.length && sel.length<K;i++) sel.push(i); }
+  const score = new Array(sel.length).fill(0), tried = new Array(sel.length).fill(0);
   for(let d=0; d<MC.det; d++){
     const world = determinize(idx);
     const rootMoves = mcMoves(world, idx);
-    for(let a=0; a<K; a++){
-      const cand = C[a];
+    for(let a=0; a<sel.length; a++){
+      const cand = C[sel[a]];
       const wantHike = /\+ Hike/.test(cand.label||'');
       const mv = rootMoves.find(m=>m.cardId===cand.cardId && m.mode===cand.mode && !m.hike===!wantHike);
       if(!mv || mv.plays>world.playsLeft) continue;
       const st = mcWorld(world);
-      mv.exec(st); // clone-safe: execs re-fetch their cards from the target state
+      mv.exec(st);
       st.playsLeft -= mv.plays;
       const w0 = mcWinner(st);
       score[a] += w0>=0 ? (w0===idx ? 1 : 0) : rolloutValue(st, idx);
@@ -3714,14 +3734,30 @@ function mctsChoose(idx, C){
     }
   }
   let best = -1, bestAvg = -1;
-  for(let a=0; a<K; a++){
-    if(tried[a] < MC.det*0.5) continue; // unreliable action estimate — skip
+  for(let a=0; a<sel.length; a++){
+    if(tried[a] < MC.det*0.5) continue;
     const avg = score[a]/tried[a];
     if(avg > bestAvg + 1e-9){ bestAvg = avg; best = a; }
   }
-  return best > 0 ? C[best] : null; // only override greedy when a rival action wins the vote
+  if(best < 0) return null;
+  const chosen = C[sel[best]];
+  return chosen !== C[0] ? chosen : null; // override greedy only when a rival wins the search
   } finally { UNSEEN_CACHE = _uc; }
 }
+/* ---------- policy action encoding: 14 abstract move slots (AlphaZero policy head) ---------- */
+const POLICY_SLOTS = ['prop','wild','takeover','rent','renthike','swipe','swap','favour','shout','payday','granny','resort','bankmoney','bankspare'];
+const POLICY_N = POLICY_SLOTS.length;
+const POLICY_IX = {}; POLICY_SLOTS.forEach((s,i)=>POLICY_IX[s]=i);
+function slotOf(cand, p){
+  const card = (p && cand) ? p.hand.find(x=>x.id===cand.cardId) : null; if(!card) return -1;
+  if(cand.mode==='bank') return card.t==='money' ? POLICY_IX.bankmoney : POLICY_IX.bankspare;
+  if(card.t==='prop') return POLICY_IX.prop;
+  if(card.t==='wild'||card.t==='wildall') return POLICY_IX.wild;
+  if(card.t==='rent'||card.t==='rentall') return /Hike/.test(cand.label||'') ? POLICY_IX.renthike : POLICY_IX.rent;
+  if(card.t==='action') return POLICY_IX[card.kind]!=null ? POLICY_IX[card.kind] : -1;
+  return -1;
+}
+let POLICY_CHOICE_SLOT = -1; // slot the brain actually played this aiStep (self-play policy target)
 function aiStep(p){
   if(G.over) return;
   const idx = G.turn;
@@ -3735,6 +3771,7 @@ function aiStep(p){
     const mc = mctsChoose(idx, C);
     if(mc) choice = mc;
   }catch(e){ /* Monte Carlo must never break play — greedy fallback */ }
+  POLICY_CHOICE_SLOT = slotOf(choice, p);
   choice.run();
 }
 
