@@ -47,7 +47,7 @@
     else if(a==='--net') opts.net=argv[++i];
   }
   if(opts.mc) MC_ON = true;
-  const REC = FEAT_N + 1;
+  const REC = FEAT_N + POLICY_N + 1;
 
   /* ---------- deterministic self-play (mirrors the trainer's game loop) ---------- */
   const pump = ()=>{ let n=0; while(timers.length && n<20000){ const f=timers.shift(); try{f();}catch(e){} n++; } };
@@ -59,9 +59,12 @@
   const SAMPLER = { p: 0, pend: null };
   const origAiStep = aiStep;
   aiStep = function(p){
-    if(SAMPLER.pend && !G.over && G.playsLeft>0 && Math.random() < SAMPLER.p)
-      SAMPLER.pend.push({ f: featuresOf(G, G.turn), seat: G.turn });
-    return origAiStep(p);
+    const doS = SAMPLER.pend && !G.over && G.playsLeft>0 && Math.random() < SAMPLER.p;
+    const feat = doS ? featuresOf(G, G.turn) : null, seat = G.turn;
+    POLICY_CHOICE_SLOT = -1;
+    const r = origAiStep(p);
+    if(doS && feat && POLICY_CHOICE_SLOT>=0) SAMPLER.pend.push({ f: feat, slot: POLICY_CHOICE_SLOT, seat: seat });
+    return r;
   };
   function playAndSample(seed, sampleP, sink){
     timers.length = 0;
@@ -77,7 +80,7 @@
     Math.random = trueRandom;
     if(!G.over) return 0; // unfinished — discard samples
     const w = G.players.findIndex(q=>completeColors(q).length>=3);
-    pend.forEach(r=>sink(r.f, r.seat===w ? 1 : 0));
+    pend.forEach(r=>sink(r.f, r.slot, r.seat===w ? 1 : 0));
     return pend.length;
   }
   function gen(){
@@ -85,7 +88,7 @@
     const fd = fs.openSync(opts.file, 'a');
     if(opts.net){ loadValueNet(JSON.parse(fs.readFileSync(opts.net,'utf8'))); console.log('gen: value net '+opts.net+' loaded (netHorizon rollouts)'); }
     let rows = 0, buf = [];
-    const sink = (f, y)=>{ buf.push(...f, y); rows++;
+    const sink = (f, slot, y)=>{ for(var i=0;i<f.length;i++) buf.push(f[i]); for(var j=0;j<POLICY_N;j++) buf.push(j===slot?1:0); buf.push(y); rows++;
       if(buf.length >= REC*512){ fs.writeSync(fd, Buffer.from(new Float32Array(buf).buffer)); buf = []; } };
     for(let g=0; g<opts.games; g++) playAndSample(opts.seed*1000003 + g, opts.sample, sink);
     if(buf.length) fs.writeSync(fd, Buffer.from(new Float32Array(buf).buffer));
@@ -234,13 +237,12 @@
     check('netValue is a probability', p>0 && p<1 && Number.isFinite(p));
     // gen determinism: same seed, same rows
     const rows = [];
-    playAndSample(7, 1.0, (f,y)=>rows.push([f,y]));
+    playAndSample(7, 1.0, (f,slot,y)=>rows.push([f,slot,y]));
     const rows2 = [];
-    playAndSample(7, 1.0, (f,y)=>rows2.push([f,y]));
+    playAndSample(7, 1.0, (f,slot,y)=>rows2.push([f,slot,y]));
     check('self-play sampling is deterministic per seed', JSON.stringify(rows)===JSON.stringify(rows2) && rows.length>10);
     check('labels are consistent within a game (exactly one winning seat)', (()=>{
-      const wins = new Set(rows.filter(r=>r[1]===1).map(()=>1));
-      return rows.some(r=>r[1]===1) && rows.some(r=>r[1]===0);
+      return rows.some(r=>r[2]===1) && rows.some(r=>r[2]===0);
     })());
     loadValueNet(null);
     process.exitCode = ok ? 0 : 1;

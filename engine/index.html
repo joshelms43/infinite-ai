@@ -3722,6 +3722,20 @@ function mctsChoose(idx, C){
   return best > 0 ? C[best] : null; // only override greedy when a rival action wins the vote
   } finally { UNSEEN_CACHE = _uc; }
 }
+/* ---------- policy action encoding: 14 abstract move slots (AlphaZero policy head) ---------- */
+const POLICY_SLOTS = ['prop','wild','takeover','rent','renthike','swipe','swap','favour','shout','payday','granny','resort','bankmoney','bankspare'];
+const POLICY_N = POLICY_SLOTS.length;
+const POLICY_IX = {}; POLICY_SLOTS.forEach((s,i)=>POLICY_IX[s]=i);
+function slotOf(cand, p){
+  const card = (p && cand) ? p.hand.find(x=>x.id===cand.cardId) : null; if(!card) return -1;
+  if(cand.mode==='bank') return card.t==='money' ? POLICY_IX.bankmoney : POLICY_IX.bankspare;
+  if(card.t==='prop') return POLICY_IX.prop;
+  if(card.t==='wild'||card.t==='wildall') return POLICY_IX.wild;
+  if(card.t==='rent'||card.t==='rentall') return /Hike/.test(cand.label||'') ? POLICY_IX.renthike : POLICY_IX.rent;
+  if(card.t==='action') return POLICY_IX[card.kind]!=null ? POLICY_IX[card.kind] : -1;
+  return -1;
+}
+let POLICY_CHOICE_SLOT = -1; // slot the brain actually played this aiStep (self-play policy target)
 function aiStep(p){
   if(G.over) return;
   const idx = G.turn;
@@ -3735,6 +3749,7 @@ function aiStep(p){
     const mc = mctsChoose(idx, C);
     if(mc) choice = mc;
   }catch(e){ /* Monte Carlo must never break play — greedy fallback */ }
+  POLICY_CHOICE_SLOT = slotOf(choice, p);
   choice.run();
 }
 
