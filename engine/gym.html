@@ -573,30 +573,29 @@ self.postMessage({type:'ready'});
   function getAiSection(){ if(aiSection) return aiSection;
     const a=engine.indexOf('/* ================= AI ================= */'), b=engine.indexOf('/* ================= BOOT ================= */');
     aiSection = engine.slice(a,b).replace(/<\/script>\s*<script>/g, ';'); return aiSection; }
-  let duelPool=[];
   function certify(cand, champ, maxSeeds){
     return new Promise((resolve)=>{
       const duelCore=$id('duel-core').textContent, sect=getAiSection();
-      if(!duelPool.length){ const dn=Math.max(1,(navigator.hardwareConcurrency||4)-2);
-        for(let i=0;i<dn;i++){ duelPool.push(new Worker(URL.createObjectURL(new Blob([boot],{type:'text/javascript'})))); } }
-      const results=new Map(); let done=false, SEED0=90000+((Date.now()/1000)|0)%90000;
+      const dn=Math.max(1,(navigator.hardwareConcurrency||4)-2);
+      const pool=[]; const results=new Map(); let done=false, SEED0=90000+((Date.now()/1000)|0)%90000;
+      const pct=x=>(x*100).toFixed(1)+'%';
       function totals(){ let S=0,V=0,dec=0; results.forEach(r=>{ const d=r.W-r.decided/2; S+=d; V+=d*d; dec+=r.decided; }); return {dec, share:dec>0?0.5+S/dec:0.5, hw:dec>0?boundary(V)/dec:Infinity}; }
       function verdict(){ const t=totals(); if(t.dec<90) return null; if(t.share-t.hw>0.5) return 'win'; if(t.share+t.hw<0.5) return 'lose'; if(results.size>=maxSeeds) return 'inconclusive'; return null; }
-      function nextSeed(){ let s=SEED0; const busy=new Set(duelPool.filter(w=>w.busySeed!=null).map(w=>w.busySeed)); while(results.has(s)||busy.has(s)) s++; return s; }
-      function dispatch(w){ if(done||results.size+duelPool.filter(x=>x.busySeed!=null).length>=maxSeeds){ w.busySeed=null; return; } w.busySeed=nextSeed(); w.postMessage({type:'play', seed:w.busySeed}); }
-      function finish(v){ if(done) return; done=true; duelPool.forEach(w=>{ w.onmessage=null; w.busySeed=null; }); resolve(v); }
-      const pct=x=>(x*100).toFixed(1)+'%';
-      duelPool.forEach(w=>{ w.busySeed=null;
+      function nextSeed(){ let s=SEED0; const busy=new Set(pool.filter(w=>w.busySeed!=null).map(w=>w.busySeed)); while(results.has(s)||busy.has(s)) s++; return s; }
+      function dispatch(w){ if(done||results.size+pool.filter(x=>x.busySeed!=null).length>=maxSeeds){ w.busySeed=null; return; } w.busySeed=nextSeed(); w.postMessage({type:'play', seed:w.busySeed}); }
+      function finish(v){ if(done) return; done=true;
+        if(results.size<10) logLine('  duel made only '+results.size+' seeds — likely a worker error (open the browser console for the red message)');
+        pool.forEach(w=>{ try{ w.terminate(); }catch(e){} }); resolve(v); }
+      for(let i=0;i<dn;i++){ const w=new Worker(URL.createObjectURL(new Blob([boot],{type:'text/javascript'}))); w.busySeed=null; pool.push(w);
         w.onmessage=(e)=>{ const d=e.data;
-          if(d.type==='fatal'){ logLine('duel worker: '+d.msg); return; }
+          if(d.type==='fatal'){ logLine('  duel worker error: '+d.msg); return; }
           if(d.type==='ready'){ w.postMessage({type:'setup', aiSection:sect, workNet:cand, baseNet:champ, workPatch:'MC.jsn=0;', basePatch:'MC.jsn=0;'}); return; }
           if(d.type==='armed'){ dispatch(w); return; }
           if(d.type==='seed'){ results.set(d.seed,{W:d.W, decided:d.decided}); const t=totals();
             const b=$id('lapbadge'); if(b) b.textContent='certifying · '+pct(t.share)+' ±'+(t.hw*100).toFixed(1)+'pp ('+results.size+' seeds)';
-            const v=verdict(); if(v) finish(v); else dispatch(w); return; }
-        };
-        w.postMessage({type:'boot', engine, core: duelCore}); });
-      setTimeout(()=>finish(verdict()||'inconclusive'), 10*60*1000); // never hang a lap
+            const v=verdict(); if(v) finish(v); else dispatch(w); return; } };
+        w.postMessage({type:'boot', engine, core: duelCore}); }
+      setTimeout(()=>finish(verdict()||'inconclusive'), 10*60*1000);
     });
   }
 
